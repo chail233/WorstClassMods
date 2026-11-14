@@ -1,0 +1,60 @@
+<Project>
+
+  <!-- 所有 Mod 子项目共享的构建配置：一个 Mod 一个文件夹，csproj 里只需写 AssemblyName/RootNamespace -->
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <GameDir>E:\SteamLibrary\steamapps\common\Worst Class Ever</GameDir>
+    <ManagedDir>$(GameDir)\Worst Class Ever_Data\Managed</ManagedDir>
+    <!-- 注意：ModOutDir 定义在 Directory.Build.targets——MSBuild 属性定义时立即求值，
+         放这里会拿不到子项目设置的 AssemblyName -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 官方 Mod API：IMod / ModContext -->
+    <Reference Include="WorstClassEver.ModAPI">
+      <HintPath>$(ManagedDir)\WorstClassEver.ModAPI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- 游戏自带 Harmony（打游戏方法补丁用） -->
+    <Reference Include="0Harmony">
+      <HintPath>$(ManagedDir)\0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(ManagedDir)\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.IMGUIModule">
+      <HintPath>$(ManagedDir)\UnityEngine.IMGUIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- c1 变体：MonoBehaviour 定义在 facade，此引用必须保留 -->
+    <Reference Include="UnityEngine">
+      <HintPath>$(ManagedDir)\UnityEngine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(ManagedDir)\Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- Mirror 网络：NetworkMessage / Writer / Reader / RegisterHandler -->
+    <Reference Include="Mirror">
+      <HintPath>$(ManagedDir)\Mirror.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- FMOD：含 FMOD / FMOD.Studio / FMODUnity 三个命名空间 -->
+    <Reference Include="FMODUnity">
+      <HintPath>$(ManagedDir)\FMODUnity.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- Rewired 输入：读自定义按键用硬件级 Keyboard API（不依赖预定义 action） -->
+    <Reference Include="Rewired_Core">
+      <HintPath>$(ManagedDir)\Rewired_Core.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>

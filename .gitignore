@@ -1,0 +1,14 @@
+# 构建输出
+bin/
+obj/
+
+# IDE / 用户本地配置
+.idea/
+.vs/
+*.user
+*.suo
+
+# 音频文件（版权原因不入库）：把 MP3 放进各 Mod 的 Music/ 目录，Git 不跟踪
+*.mp3
+*.wav
+*.ogg

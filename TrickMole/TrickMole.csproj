@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- 混的入：每节课随机一名学生捣蛋分 ×2，全员可见。共享属性/引用/部署见上层 Directory.Build.props 与 targets -->
+
+  <PropertyGroup>
+    <AssemblyName>TrickMole</AssemblyName>
+    <RootNamespace>TrickMole</RootNamespace>
+  </PropertyGroup>
+
+</Project>

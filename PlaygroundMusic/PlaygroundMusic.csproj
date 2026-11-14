@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- 操场广播音乐扩展：共享属性/引用/部署逻辑见上层 Directory.Build.props 与 Directory.Build.targets -->
+
+  <PropertyGroup>
+    <AssemblyName>PlaygroundMusic</AssemblyName>
+    <RootNamespace>PlaygroundMusic</RootNamespace>
+  </PropertyGroup>
+
+</Project>

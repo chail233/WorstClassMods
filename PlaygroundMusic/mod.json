@@ -1,0 +1,13 @@
+{
+  "id": "worstclass.playgroundmusic",
+  "name": "外高音乐扩展",
+  "author": "chail",
+  "version": "1.0.0",
+  "description": "外高bgm",
+  "apiVersion": 1,
+  "assembly": "PlaygroundMusic.dll",
+  "entryType": "PlaygroundMusic.ModEntry",
+  "affectsNetworkMessages": true,
+  "dependencies": [],
+  "conflictsWith": []
+}
