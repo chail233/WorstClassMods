@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- AI 老师：电脑控制的老师补足老师位，单人/联机都能玩。共享属性/部署见上层 Directory.Build.props 与 targets -->
+
+  <PropertyGroup>
+    <AssemblyName>AITeacher</AssemblyName>
+    <RootNamespace>AITeacher</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- AI 移动寻路：NavMeshAgent / NavMesh -->
+    <Reference Include="UnityEngine.AIModule">
+      <HintPath>$(ManagedDir)\UnityEngine.AIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- AI 视线遮挡检测：Physics.RaycastAll -->
+    <Reference Include="UnityEngine.PhysicsModule">
+      <HintPath>$(ManagedDir)\UnityEngine.PhysicsModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- 游戏配置表基类（GameSetting 等表 Bean 继承 BeanBase） -->
+    <Reference Include="Luban.Runtime">
+      <HintPath>$(ManagedDir)\Luban.Runtime.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>
