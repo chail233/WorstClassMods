@@ -22,7 +22,7 @@
 - `AITeacher\` — AI 老师（id=`worstclass.aiteacher`，`affectsNetworkMessages: false`，**纯房主侧 Mod：其他玩家不装也能看到 AI 老师移动/攻击/抓人**）：
   - 原理：房主 `CreateUnitNetData(1001/1002, syncMsg:false)` + 手动广播 `UnitBornMessageResponse_S2C`（玩家 ID 被排除在自动 UnitBorn 外，`UnitManager.cs:570`）+ `CreateCommonUnit(isLocal:true)`；客户端收到 UnitBorn 走 `CreateUnitAuto` 非玩家路由，模型/pose/动画走原生链路自动同步（`IsUnitPoseSender` 对 host 本地连接只要 `unit.isLocal` 即放行）。`GenerateComponentByType` postfix 按 UID 登记表给 AI unit 补挂老师组件 + `TeacherAIComponent`（**UID 登记必须在 CreateCommonUnit 之前**，postfix 在创建过程中就要查）。
   - 单人开局：prefix 放行 `SendStartClassMsg` 的 `Unit_CantSingleStart` 拦截；`GetCurrentIntValue(ClassTeacherCount)` postfix 减 AI 设定让原版少分真人老师；`AssignClassTeacher` prefix 全 AI 时接管、postfix 按"规则数−真人老师数"差额补 AI。F8 面板改数量/形态（写回 `Configs/aiteacher/aiteacher.json`），下局按铃生效。
-  - AI 行为（`TeacherAIComponent.cs`，v1.1 证据驱动）：巡逻（50% 偏向捣蛋热点）→ 目标获取必须**有嫌疑**才追——视野内违规（手持捣蛋物品/玩电脑，判定口径抄 `SurveillanceCameraComponent.CollectViolationStates`，Manager 里 0.25s 共享缓存）或听见捣蛋雷达事件，无辜学生不追 → 追击（Chase 态 agent.speed × `chaseSpeedBoost` 冲刺）→ 粉笔按目标 `ForceComponent.Velocity` 预判落点（自建 4002 投射物；`ShootChalk` 依赖相机不能直接用）/ 剑气直调 AI 自己的 `TeacherMeleeComponent.HandleSlashFire`（**不能走 `OnTeacherSlashFire`：`TeacherSlashSender` 按 connection 解析会解析成房主本人**）→ 抓捕发 `UseSkillMessageRequest_C2S{skillID=3}`（host 直调，无连接归属校验）→ 挂柱自建 `TeacherBindStudentMessageRequest_C2S`（`BindStudentToPillar` 写死 localPlayerUID 不能用）。多 AI 协同 = Manager 目标认领表去重；移速默认 0 = 读房间规则 `TeacherSpeed`（与真人老师同速）；调查阶段有两个查看点。F8 面板难度四档（宽松/标准/严格/地狱=听力全图）一键应用预设。
+  - AI 行为（`TeacherAIComponent.cs`，v1.1 证据驱动）：**课前倒计时就走位进教室**（出生点 teacherPos 在办公室/玄关，教室外强制把巡逻点定在教室内，卡死走传送），巡逻（50% 偏向捣蛋热点）→ 目标获取必须**有嫌疑**才追——视野内违规（手持捣蛋物品/玩电脑，判定口径抄 `SurveillanceCameraComponent.CollectViolationStates`，Manager 里 0.25s 共享缓存）或听见捣蛋雷达事件，无辜学生不追 → 追击（Chase 态 agent.speed × `chaseSpeedBoost` 冲刺）→ 粉笔按目标 `ForceComponent.Velocity` 预判落点（自建 4002 投射物；`ShootChalk` 依赖相机不能直接用）/ 剑气直调 AI 自己的 `TeacherMeleeComponent.HandleSlashFire`（**不能走 `OnTeacherSlashFire`：`TeacherSlashSender` 按 connection 解析会解析成房主本人**）→ 抓捕发 `UseSkillMessageRequest_C2S{skillID=3}`（host 直调，无连接归属校验）→ 挂柱自建 `TeacherBindStudentMessageRequest_C2S`（`BindStudentToPillar` 写死 localPlayerUID 不能用）。多 AI 协同 = Manager 目标认领表去重；移速默认 0 = 读房间规则 `TeacherSpeed`（与真人老师同速）；调查阶段有两个查看点。F8 面板难度四档（宽松/标准/严格/地狱=听力全图）一键应用预设。
   - ⚠️ 网络身份坑：`OnChalkHitRequest` 服务器要求"连接推导 UID == 消息 TeacherUID"，AI 的粉笔/剑气击晕上报必被拒——prefix 接管 AI 命中按原版服务端逻辑直接 `StudentStunComponent.GetStun`。AI 模型 rigidbody 置 kinematic 防 NavMesh 对抗（`OnDisBindObj` 还原防污染模型池）；教室 NavMesh 可能晚于 AI 出生才烘焙，`EnsureAgent` 每秒重试。csproj 额外引用 `UnityEngine.AIModule`（NavMeshAgent）+ `UnityEngine.PhysicsModule`（RaycastAll）+ `Luban.Runtime`（GameSetting 基类 BeanBase）。
 - **新增一个 Mod**：建文件夹 → csproj 只写 `AssemblyName`/`RootNamespace` → `mod.json`（id/assembly/entryType 三处一致）→ `dotnet sln add` → 源码里 `OnLoad(ModContext)` 入口
 - 反编译游戏源码（ilspycmd 8.2 生成，写 hook 前先搜，不要凭空猜类名）：
@@ -42,6 +42,15 @@ dotnet build D:/WorstClassMod/WorstClassMods.sln
 - **游戏必须完全重启才会加载新 DLL**
 - Rider 的 MCP `build_solution_state` 会误报 `buildIsSuccess: false`——以 `dotnet build` 输出为准
 - 验证编译错误：`dotnet build -v q 2>&1 | grep error`
+
+## 创意工坊发布（Workshop/）
+
+- **每个 Mod = 一个独立工坊物品**：`Workshop\<Mod>\item.vdf`（元数据权威源，含 publishedfileid）+ `Workshop\<Mod>\preview.*`；一次命令只动一个 Mod
+- 发布：`powershell -ExecutionPolicy Bypass -File Workshop\upload.ps1 <Mod> -Build -ChangeNote "..."`；`-SkipUpload` 只同步校验不连 Steam
+- 上传器 `Workshop\Uploader\`（net8 控制台，**不进 sln**，csproj 设 `IsGameMod=false` 跳过共享 targets 部署）：引用游戏自带 Steamworks.NET.dll + steam_api64.dll，复用桌面 Steam 登录会话（`steam_appid.txt` 自动生成）——无 SteamCMD、不输账号密码。首次发布成功自动回填 publishedfileid 到 vdf，之后同一命令即更新
+- 为什么不用 SteamCMD：本机网络对 Valve CDN 的 bootstrap 明文 HTTP 劫持（500）且旧引导器无 HTTPS；`Workshop\steamcmd\` 留作挂代理时的备用（vdf 格式与上传器互通）
+- vdf 注意：标题/描述每次上传覆盖网页手改；描述支持 BBCode、字面 `\n` 转换行；值内禁英文双引号；content 路径每次上传自动按当前机器写回
+- 详细说明见 `Workshop/README.md`
 
 ## 官方框架要点
 

@@ -54,6 +54,28 @@ namespace AITeacher
                 AccessTools.Method(typeof(UnitMessageHandler), "OnChalkHitRequest"),
                 prefix: new HarmonyMethod(typeof(AiTeacherPatches), "BeforeOnChalkHitRequest"));
 
+            // ---- 诊断：粉笔弹道物理触发（弹道到底有没有碰到学生）----
+            harmony.Patch(
+                AccessTools.Method(typeof(ProjectileComponent), "OnTriggerEnter", new[] { typeof(Unit), typeof(Collider) }),
+                postfix: new HarmonyMethod(typeof(AiTeacherPatches), "AfterProjectileTriggerEnter"));
+
+            // ---- 诊断：晕眩最终应用（上报有没有变成真晕眩）----
+            harmony.Patch(
+                AccessTools.Method(typeof(StudentStunComponent), "DealStunEffect"),
+                prefix: new HarmonyMethod(typeof(AiTeacherPatches), "BeforeDealStunEffect"));
+
+            // ---- 诊断 + 修复：剑气命中检测只在拥有者客户端跑（locallyOwned），AI 不是任何客户端的
+            //      localPlayer，全房间没人模拟命中 → 剑气永远打不中人。 ApplyFire 后把 AI 弹道标记为
+            //      本机拥有，host 即可跑 AdvanceOwned → ReportStudentHit → 走 AI 命中补丁 ----
+            harmony.Patch(
+                AccessTools.Method(typeof(TeacherSlashProjectile), "ApplyFire"),
+                postfix: new HarmonyMethod(typeof(AiTeacherPatches), "AfterSlashApplyFire"));
+
+            // ---- 诊断：剑气命中上报 ----
+            harmony.Patch(
+                AccessTools.Method(typeof(TeacherSlashProjectile), "ReportStudentHit"),
+                prefix: new HarmonyMethod(typeof(AiTeacherPatches), "BeforeSlashReportStudentHit"));
+
             // ---- AI 老师 unit 组件补挂（host 创建路径）----
             harmony.Patch(
                 AccessTools.Method(typeof(UnitManager), "GenerateComponentByType"),
@@ -164,16 +186,69 @@ namespace AITeacher
         private static bool BeforeOnChalkHitRequest(ChalkHitRequest_C2S request)
         {
             if (!NetRuntime.IsServer || !AiTeacherManager.IsAiTeacher(request.TeacherUID)) return true;
+            ModEntry.Log?.Invoke($"[诊断] AI 命中上报到达：目标={request.UnitUID} 类型={request.StunType}");
             if (request.StunType != 0 && request.StunType != EStunType.Sword) return false;
             Unit target = MonoSingletonT<UnitManager>.Instance.GetUnitByUID(request.UnitUID);
-            if (target == null || target.IsTeacher) return false;
+            if (target == null || target.IsTeacher)
+            {
+                ModEntry.Log?.Invoke("[诊断] AI 命中被拒：目标不存在或是老师");
+                return false;
+            }
             if ((target.Position - request.Position).sqrMagnitude > 9f)
             {
                 ModEntry.Log?.Invoke($"[警告] AI 老师命中位置校验失败：目标UID={request.UnitUID}，距离超 3m");
                 return false;
             }
+            ModEntry.Log?.Invoke("[诊断] AI 命中校验通过 → 应用 GetStun");
             target.GetComponent<StudentStunComponent>()?.GetStun(request.StunType, request.HorizontalSlashStunReduction);
             return false;
+        }
+
+        /// <summary>粉笔弹道物理触发：弹道碰到任何东西都会打这一笔，用于判断"没命中"卡在哪一环</summary>
+        private static void AfterProjectileTriggerEnter(ProjectileComponent __instance, Unit otherUnit, Collider other)
+        {
+            if (__instance?.owner == null || __instance.owner.ID != 4002) return;
+            ModEntry.Log?.Invoke($"[诊断] 粉笔弹道触发：目标unit={otherUnit?.UID.ToString() ?? "非单位"} collider={other?.name} 层={other?.gameObject.layer}");
+        }
+
+        /// <summary>晕眩最终应用：走到这一步说明命中上报已生效，学生应该真的晕了</summary>
+        private static void BeforeDealStunEffect(StudentStunComponent __instance, EStunType stunType)
+        {
+            ModEntry.Log?.Invoke($"[诊断] 晕眩应用：unit={__instance.owner?.UID} 类型={stunType}");
+        }
+
+        /// <summary>
+        /// 剑气弹道命中检测只在拥有者客户端跑（locallyOwned = teacherUID == localPlayerUID）。
+        /// AI 老师 UID 永远不等于房主玩家 UID → 全房间没人跑 AdvanceOwned，剑气永远打不中人。
+        /// 这里把 AI 的剑气弹道在本机（host）标记为拥有者，host 便会模拟命中并走 AI 命中补丁。
+        /// </summary>
+        private static void AfterSlashApplyFire(TeacherSlashFired_S2C message)
+        {
+            try
+            {
+                if (!NetRuntime.IsServer || !AiTeacherManager.IsAiTeacher(message.teacherUID)) return;
+                var active = Traverse.Create(typeof(TeacherSlashProjectile)).Field("active")
+                    .GetValue<System.Collections.Generic.IDictionary<(ulong, uint), TeacherSlashProjectile>>();
+                if (active != null && active.TryGetValue((message.teacherUID, message.sequence), out var projectile)
+                    && projectile != null)
+                {
+                    Traverse.Create(projectile).Field("locallyOwned").SetValue(true);
+                    ModEntry.Log?.Invoke($"[状态] AI 剑气弹道已标记本机模拟（seq={message.sequence}）");
+                }
+            }
+            catch (System.Exception ex)
+            {
+                ModEntry.Log?.Invoke("[警告] AI 剑气弹道拥有者标记失败：" + ex.Message);
+            }
+        }
+
+        /// <summary>剑气命中上报：走到这一步说明弹道真的碰到了学生</summary>
+        private static void BeforeSlashReportStudentHit(TeacherSlashProjectile __instance, Unit target)
+        {
+            ulong teacherUid = 0UL;
+            var shot = Traverse.Create(__instance).Field("shot").GetValue<TeacherSlashFired_S2C>();
+            if (shot.teacherUID != 0UL) teacherUid = shot.teacherUID;
+            ModEntry.Log?.Invoke($"[诊断] 剑气命中上报：老师={teacherUid} 目标={target?.UID}（AI={AiTeacherManager.IsAiTeacher(teacherUid)}）");
         }
 
         // ===== 7. AI 老师组件补挂（对齐 CreatePlayer 的老师分支，时机在 SetAwake 前）=====

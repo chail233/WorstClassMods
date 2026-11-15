@@ -27,10 +27,14 @@ namespace AITeacher
         public float attackCooldown = 1.5f;    // 攻击间隔下限（秒，粉笔与剑通用；剑另有房规 CD）
         public float catchMinEnergy = 15f;     // 体力低于此值不再攻击（保底抓捕）
         public float energyRegenPerSecond = 2f;// AI 体力回复速率（AI 无原版被动消耗，仅攻击扣）
-        public float patrolInterval = 4f;      // 巡逻换点间隔（秒）
-        public float patrolRadius = 6f;        // 巡逻点在当前位置周围的半径（米）
-        public float chalkSpreadDeg = 4f;      // 粉笔散布角度（度，0=百发百中）
+        public float patrolTimeout = 14f;      // 单个巡逻点走不到就换点的超时（秒）
+        public float patrolDwell = 1.2f;       // 巡逻到点后的驻足观察时长（秒，实际随机浮动）
+        public float patrolRadius = 6f;        // 兜底随机巡逻点在当前位置周围的半径（米，座位区采样失败才用）
+        public bool observeLeaveSeat = true;   // 上课离座 = 违规，看到就管（去厕所也算，坐下即解除）
+        public float leaveSeatGrace = 1.2f;    // 离座宽限（秒）：起身这么久才算违规，防起坐抖动误判
+        public float chalkSpreadDeg = 4f;      // 粉笔散布角度（度，0=百发百中；贴脸自动衰减到 0）
         public float chalkLeadFactor = 0.85f;  // 粉笔瞄准提前量系数（按目标速度预判落点，0=关闭）
+        public float focusMaxSeconds = 4f;     // 凝视安全超时（秒）：超时自动解除，防止学生被永久冻结
         public bool observeTrickItems = true;  // 视野内手持捣蛋物品/玩电脑 = 违规，立即追
         public bool hotspotPatrol = true;      // 巡逻偏向历史捣蛋热点
         public bool cooperate = true;          // 多 AI 协同：目标认领去重，不挤同一个学生

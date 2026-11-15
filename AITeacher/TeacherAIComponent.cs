@@ -1,3 +1,5 @@
+using System.Collections.Generic;
+using HarmonyLib;
 using UnityEngine;
 using UnityEngine.AI;
 
@@ -26,16 +28,36 @@ namespace AITeacher
         private float investigateUntil;
         private int investigateStage;      // 调查阶段：0=第一查看点 1=第二查看点
         private float investigateStageAt;
-        private float patrolPickAt;
+        private bool hasPatrolPoint;
         private Vector3 patrolPoint;
+        private float patrolLegUntil;   // 当前巡逻点走不到就换点的超时
+        private float patrolDwellUntil; // 到点后的驻足观察时长
+        private Vector3 patrolStuckRefPos; // 巡逻卡死检测参考点
+        private float patrolStuckSince;    // 巡逻卡死起始时刻
+        private Vector3 chaseStuckRefPos;  // 追击卡死检测参考点
+        private float chaseStuckSince;     // 追击卡死起始时刻
         private float nextActionAt;   // 反应延迟/节奏停顿
         private float nextAttackAt;
         private float nextCatchAt;    // 抓捕请求节流
+        private float nextFocusAt;    // 凝视技能冷却
+        private ulong focusedUid;     // 凝视中的学生（0=无）
+        private float focusedUntil;   // 凝视安全超时（防 AI 卡死导致学生永久冻结）
         private float nextAgentCheck; // NavMesh 就绪重试节流
         private float baseSpeedCache; // 房间规则移速缓存（1s 刷新）
         private float baseSpeedAt;
         private float noPillarSince;  // 手里没柱子可挂的计时
         private bool movingAnim;
+
+        private bool forceClassroomPoint;  // 下一次选点必须落在教室里（出生在办公室/走廊时先走进教室）
+        private bool enteredClassroom;     // 本局已进过教室（进过就不再强制回教室，热点巡逻可正常出教室）
+        private bool enterClassLogged;     // "在教室外"日志只打一次
+        private Vector3 prepDest;          // 课前走向教室的落脚点
+        private float prepDestUntil;       // 课前落脚点重选超时
+        private bool prepDestValid;
+        private Vector3 prepStuckRefPos;   // 课前卡死检测参考点
+        private float prepStuckSince;
+
+        private const float EnterClassroomRadius = 12f; // 离教室中心这么近就算已进教室
 
         private AiTeacherConfig Cfg => ModEntry.Config;
 
@@ -44,6 +66,17 @@ namespace AITeacher
         public override void OnBindObj(ObjectModel obj)
         {
             base.OnBindObj(obj);
+            // 组件来自对象池：回合状态必须重置，否则上一局"已进过教室"会带进新一局，老师又不进教室了
+            state = AiState.Patrol;
+            enteredClassroom = false;
+            forceClassroomPoint = false;
+            enterClassLogged = false;
+            hasPatrolPoint = false;
+            patrolLegUntil = 0f;
+            patrolDwellUntil = 0f;
+            prepDestValid = false;
+            prepDestUntil = 0f;
+            prepStuckSince = 0f;
             if (obj == null || owner == null || !owner.isLocal || !NetRuntime.IsServer) return;
             // 老师模型 prefab 不带 NavMeshAgent，host 侧动态加（同 NPC 学生的 host 门禁惯例）
             agent = obj.GetComponent<NavMeshAgent>();
@@ -75,6 +108,10 @@ namespace AITeacher
             }
             Rigidbody rb = (obj != null) ? obj.GetComponent<Rigidbody>() : null;
             if (rb != null) rb.isKinematic = false; // 模型回收进池前还原物理
+            if (NetRuntime.IsServer && focusedUid != 0L)
+            {
+                ReleaseFocus("AI 老师回收"); // 别把被凝视的学生永久冻在原地
+            }
             base.OnDisBindObj(obj);
         }
 
@@ -92,10 +129,20 @@ namespace AITeacher
             RegenerateEnergy(iDt);
             EnsureAgent();
 
-            bool classing = ClassroomManager.IsSingletonActive()
-                && ClassroomManager.Instance.curState == EClassroomState.Classing;
-            if (owner.IsStun || !classing)
+            // 凝视安全超时：AI 卡死/状态异常时自动放人，学生不能被永久冻结
+            if (focusedUid != 0L && Time.unscaledTime >= focusedUntil)
             {
+                ReleaseFocus("凝视超时");
+            }
+
+            EClassroomState clsState = ClassroomManager.IsSingletonActive()
+                ? ClassroomManager.Instance.curState
+                : EClassroomState.BeforeClass;
+            bool classing = clsState == EClassroomState.Classing;
+            bool preparing = clsState == EClassroomState.Prepare;
+            if (owner.IsStun || (!classing && !preparing))
+            {
+                ReleaseFocus(owner.IsStun ? "老师被晕眩" : "下课");
                 StopAgent();
                 SetMoving(false);
                 return;
@@ -105,6 +152,13 @@ namespace AITeacher
             if (catchComp != null && catchComp.catchedUnitUID != 0L)
             {
                 TickBindPillar();
+                return;
+            }
+
+            // 课前倒计时：只提前走进教室站好位，不抓人（倒计时里学生可能还没坐齐）
+            if (!classing)
+            {
+                TickPrepareMove();
                 return;
             }
 
@@ -137,7 +191,8 @@ namespace AITeacher
 
         private bool IsObstructed(Vector3 origin, Vector3 dir, float dist, Unit target)
         {
-            RaycastHit[] hits = Physics.RaycastAll(origin, dir, dist, Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore);
+            // 层掩码与粉笔实际碰撞一致（ChalkColliderMask：排除 Interaction/Player/PlayerSelf）
+            RaycastHit[] hits = Physics.RaycastAll(origin, dir, dist, ConstantDefine.ChalkColliderMask, QueryTriggerInteraction.Ignore);
             for (int i = 0; i < hits.Length; i++)
             {
                 Transform t = hits[i].collider.transform;
@@ -168,8 +223,9 @@ namespace AITeacher
         }
 
         /// <summary>
-        /// 目标获取（证据驱动）：视野内违规（手持捣蛋物品/玩电脑）或听见近期捣蛋才追。
+        /// 目标获取（证据驱动）：视野内违规（手持捣蛋物品/玩电脑/上课离座）或听见近期捣蛋才追。
         /// 坐着学习/纯路过的无辜学生不追——原逻辑"看见就追"显得莽撞。
+        /// 离座在操场地图不算（学生本来就没座位）。
         /// 协同开启时跳过已被其他 AI 认领的目标。
         /// </summary>
         private Unit AcquireTarget(out string reason)
@@ -177,19 +233,27 @@ namespace AITeacher
             reason = null;
             Unit best = null;
             float bestDist = float.MaxValue;
+            bool leaveSeatEnabled = Cfg.observeLeaveSeat && !AiTeacherManager.IsPlaygroundFloor();
             foreach (Unit player in UnitManager.Instance.playerList)
             {
                 if (!IsValidStudent(player)) continue;
                 bool heard = AiTeacherManager.TryHearTrick(player.UID, owner.Position, Cfg.hearingDistance, Cfg.suspicionMemory, out _);
                 bool violating = Cfg.observeTrickItems && AiTeacherManager.IsViolating(player.UID);
-                if (!heard && !(violating && IsVisible(player))) continue; // 无嫌疑，放过
+                bool outSeat = leaveSeatEnabled && AiTeacherManager.IsOutOfSeat(player.UID, Cfg.leaveSeatGrace);
+                bool needVision = violating || outSeat;
+                bool visible = needVision && IsVisible(player);
+                if (violating && !visible) violating = false;
+                if (outSeat && !visible) outSeat = false;
+                if (!heard && !violating && !outSeat) continue; // 无嫌疑，放过
                 if (Cfg.cooperate && AiTeacherManager.IsClaimedByOther(player.UID, owner.UID)) continue;
                 float distSq = (player.Position - owner.Position).sqrMagnitude;
                 if (distSq < bestDist)
                 {
                     best = player;
                     bestDist = distSq;
-                    reason = violating ? "发现违规（手持捣蛋物品/玩电脑）" : "听见捣蛋";
+                    reason = violating ? "发现违规（手持捣蛋物品/玩电脑）"
+                        : outSeat ? "发现违规（上课离座）"
+                        : "听见捣蛋";
                 }
             }
             return best;
@@ -203,6 +267,64 @@ namespace AITeacher
 
         // ===== 阶段：巡逻 =====
 
+        /// <summary>
+        /// 课前倒计时：像真人老师一样从办公室走进教室站好位（这段时间只走位不抓人）。
+        /// 否则整段倒计时都站在办公室，开课后还要再走过去，前半节课等于没有老师。
+        /// </summary>
+        private void TickPrepareMove()
+        {
+            // 教室中心还没定位（学生没坐齐）时退到讲台锚点：它出生时就是按座位区质心算的
+            if (!AiTeacherManager.TryGetClassCenter(out Vector3 classCenter)
+                && !AiTeacherManager.TryGetPodium(out classCenter))
+            {
+                StopAgent();
+                SetMoving(false);
+                return;
+            }
+            if (DistXZ(owner.Position, classCenter) <= EnterClassroomRadius)
+            {
+                enteredClassroom = true;
+                prepDestValid = false;
+                StopAgent();
+                SetMoving(false);
+                return;
+            }
+            float now = Time.unscaledTime;
+            if (!prepDestValid || Reached(prepDest, 1.2f) || now >= prepDestUntil)
+            {
+                prepDest = PickClassroomPoint(classCenter);
+                prepDestUntil = now + Cfg.patrolTimeout;
+                prepDestValid = true;
+                ModEntry.Log?.Invoke($"[状态] AI 老师（UID={owner.UID}）课前走向教室 {prepDest}");
+            }
+
+            // 课前卡死自救：路线被门/家具堵住，4 秒没挪出 0.35m 就直接传进教室（学生已经在教室等着了）
+            if (DistXZ(owner.Position, prepStuckRefPos) > 0.35f)
+            {
+                prepStuckRefPos = owner.Position;
+                prepStuckSince = now;
+            }
+            else if (now - prepStuckSince > 4f)
+            {
+                prepStuckSince = now;
+                prepStuckRefPos = owner.Position;
+                if (DistXZ(owner.Position, prepDest) <= 80f && Mathf.Abs(prepDest.y - owner.Position.y) <= 3f)
+                {
+                    ModEntry.Log?.Invoke($"[状态] AI 老师（UID={owner.UID}）课前走不进教室，直接传送至 {prepDest}");
+                    if (agent != null && agent.enabled && agent.isOnNavMesh)
+                    {
+                        agent.Warp(prepDest);
+                    }
+                    else
+                    {
+                        owner.SetPosition(prepDest);
+                    }
+                    return;
+                }
+            }
+            MoveTowards(prepDest);
+        }
+
         private void TickPatrol()
         {
             Unit target = AcquireTarget(out string reason);
@@ -212,16 +334,130 @@ namespace AITeacher
                 return;
             }
 
-            if (Time.unscaledTime >= patrolPickAt || Reached(patrolPoint, 1.2f))
+            float now = Time.unscaledTime;
+
+            // 出生在办公室/玄关：先走进教室。教室外的热点巡逻和原地兜底随机点都只在出生点附近打转，
+            // 老师一整节课都出不了办公室。进过一次教室后就不再强制（热点巡逻可以出教室追）。
+            Vector3 classCenter = default;
+            bool classCenterKnown = AiTeacherManager.TryGetClassCenter(out classCenter);
+            bool farFromClass = !enteredClassroom && classCenterKnown
+                && DistXZ(owner.Position, classCenter) > EnterClassroomRadius;
+            if (farFromClass)
             {
-                patrolPickAt = Time.unscaledTime + Cfg.patrolInterval;
+                forceClassroomPoint = true;
+                patrolDwellUntil = 0f; // 去教室路上不驻足
+                if (!hasPatrolPoint || now >= patrolLegUntil)
+                {
+                    patrolPoint = PickClassroomPoint(classCenter);
+                    patrolLegUntil = now + Cfg.patrolTimeout;
+                    hasPatrolPoint = true;
+                }
+                if (!enterClassLogged)
+                {
+                    enterClassLogged = true;
+                    ModEntry.Log?.Invoke($"[状态] AI 老师（UID={owner.UID}）在教室外，前往教室 {classCenter}");
+                }
+            }
+            else
+            {
+                if (classCenterKnown) enteredClassroom = true;
+                if (forceClassroomPoint)
+                {
+                    forceClassroomPoint = false;
+                    enterClassLogged = false;
+                    ModEntry.Log?.Invoke($"[状态] AI 老师（UID={owner.UID}）已到教室区域 {owner.Position}");
+                }
+            }
+            if (now < patrolDwellUntil)
+            {
+                // 驻足观察：站在巡逻点上看一会再走，像老师在巡视而不是赶路
+                StopAgent();
+                SetMoving(false);
+                return;
+            }
+
+            bool arrived = hasPatrolPoint && Reached(patrolPoint, 1.0f);
+            if (arrived)
+            {
                 patrolPoint = PickPatrolPoint();
+                patrolLegUntil = now + Cfg.patrolTimeout;
+                hasPatrolPoint = true;
+                float dwell = Mathf.Max(0.4f, Cfg.patrolDwell);
+                patrolDwellUntil = now + UnityEngine.Random.Range(dwell * 0.6f, dwell * 1.4f);
+                StopAgent();
+                SetMoving(false);
+                return;
+            }
+
+            // 卡死自救：巡逻想走但 3.5 秒没挪出 0.35m（路径失败、楔进家具缝等）。
+            // 传送必须谨慎：目标超过 12m 或跨层（|Δy|>2m）绝不传送——校舍地图乱传会把老师传丢
+            if (hasPatrolPoint)
+            {
+                if (DistXZ(owner.Position, patrolStuckRefPos) > 0.35f)
+                {
+                    patrolStuckRefPos = owner.Position;
+                    patrolStuckSince = now;
+                }
+                else if (now - patrolStuckSince > 3.5f)
+                {
+                    patrolStuckSince = now;
+                    patrolStuckRefPos = owner.Position;
+                    // 传送保险：≤12m 随便传；更远的点只有落在学生聚集区（本教室，30m 内）才允许传——
+                    // 校舍地图办公室离教室很远，去教室的路若走不通只能传，但绝不传去别的楼
+                    bool inClassroom = AiTeacherManager.TryGetStudentCentroid(out Vector3 studentCenter)
+                        && (patrolPoint - studentCenter).sqrMagnitude <= 900f;
+                    bool warpOk = Mathf.Abs(patrolPoint.y - owner.Position.y) <= 2f
+                        && (DistXZ(owner.Position, patrolPoint) <= 12f || (inClassroom && DistXZ(owner.Position, patrolPoint) <= 60f));
+                    if (warpOk)
+                    {
+                        patrolLegUntil = now + Cfg.patrolTimeout;
+                        ModEntry.Log?.Invoke($"[状态] AI 老师（UID={owner.UID}）巡逻卡住，传送至巡逻点 {patrolPoint}");
+                        if (agent != null && agent.enabled && agent.isOnNavMesh)
+                        {
+                            agent.Warp(patrolPoint);
+                        }
+                        else
+                        {
+                            owner.SetPosition(patrolPoint);
+                        }
+                    }
+                    else
+                    {
+                        // 目标太远/跨层/不在教室区：八成是选到了别的楼，换一个近的巡逻点重新走
+                        patrolPoint = PickPatrolPoint();
+                        patrolLegUntil = now + Cfg.patrolTimeout;
+                    }
+                    return;
+                }
+            }
+
+            bool timedOut = hasPatrolPoint && now >= patrolLegUntil;
+            if (!hasPatrolPoint || timedOut)
+            {
+                patrolPoint = PickPatrolPoint();
+                patrolLegUntil = now + Cfg.patrolTimeout;
+                hasPatrolPoint = true;
+                if (timedOut)
+                {
+                    // 超时放弃旧点：驻足片刻再出发，像老师犹豫了一下换了个方向
+                    float dwell2 = Mathf.Max(0.4f, Cfg.patrolDwell);
+                    patrolDwellUntil = now + UnityEngine.Random.Range(dwell2 * 0.6f, dwell2 * 1.4f);
+                    StopAgent();
+                    SetMoving(false);
+                    return;
+                }
             }
             MoveTowards(patrolPoint);
         }
 
         private Vector3 PickPatrolPoint()
         {
+            // 老师还在教室外：目标一律定在教室里，别在办公室附近转
+            if (forceClassroomPoint && AiTeacherManager.TryGetClassCenter(out Vector3 forceCenter))
+            {
+                return PickClassroomPoint(forceCenter);
+            }
+
             // 热点巡逻：一半概率去最近 20 秒内的捣蛋事发地附近转（捣蛋王的座位区会被反复照顾）
             if (Cfg.hotspotPatrol && UnityEngine.Random.value < 0.5f
                 && AiTeacherManager.TryGetLatestTrickPoint(20f, out Vector3 hotspot)
@@ -229,6 +465,41 @@ namespace AITeacher
             {
                 return hitHot.position;
             }
+
+            // 座位区巡视：以本班教室为中心找座位——教室定位优先用"有学生坐着的椅子"质心
+            //（单个真人学生到处晃会带偏学生质心，校舍地图教室可能离办公室 45m+）
+            if (AiTeacherManager.TryGetClassCenter(out Vector3 classCenter))
+            {
+                List<Vector3> seats = AiTeacherManager.GetSeatPointsNear(classCenter, 30f);
+                if (seats.Count > 0)
+                {
+                    for (int i = 0; i < 6; i++)
+                    {
+                        Vector3 seat = seats[UnityEngine.Random.Range(0, seats.Count)];
+                        if (NavMesh.SamplePosition(seat + RingOffset(0.9f, 1.6f), out var hit, 1.2f, NavMesh.AllAreas)
+                            && DistXZ(hit.position, seat) > 0.55f)
+                        {
+                            ModEntry.Log?.Invoke($"[状态] AI 老师（UID={owner.UID}）巡逻 → 教室座位旁 {hit.position}");
+                            return hit.position;
+                        }
+                    }
+                }
+                else if (TryGetStudentWatchPoint(out Vector3 watch))
+                {
+                    // 本班没有椅子（操场等）：点名式巡视——走向随机学生身边看一眼
+                    ModEntry.Log?.Invoke($"[状态] AI 老师（UID={owner.UID}）巡逻 → 走近学生 {watch}");
+                    return watch;
+                }
+            }
+
+            // 偶尔回讲台（巡逻原点，路线有收有放）
+            if (UnityEngine.Random.value < 0.25f && AiTeacherManager.TryGetPodium(out Vector3 podium)
+                && NavMesh.SamplePosition(podium + InsideCircle(1.2f), out var hitPodium, 1.2f, NavMesh.AllAreas))
+            {
+                return hitPodium.position;
+            }
+
+            // 兜底：当前位置周围随机
             for (int i = 0; i < 6; i++)
             {
                 Vector3 candidate = owner.Position + InsideCircle(Cfg.patrolRadius);
@@ -238,6 +509,77 @@ namespace AITeacher
                 }
             }
             return owner.Position; // 采样失败就原地站桩
+        }
+
+        /// <summary>教室内的落脚点：座位旁走道优先（能巡视），其次讲台，最后教室中心</summary>
+        private Vector3 PickClassroomPoint(Vector3 classCenter)
+        {
+            // 先只取教室尺寸内的座位（8m）：校舍地图全校椅子都叫 Chair，30m 会选到隔壁房间
+            List<Vector3> seats = AiTeacherManager.GetSeatPointsNear(classCenter, 8f);
+            if (seats.Count == 0) seats = AiTeacherManager.GetSeatPointsNear(classCenter, 30f);
+            for (int i = 0; i < 6 && seats.Count > 0; i++)
+            {
+                Vector3 seat = seats[UnityEngine.Random.Range(0, seats.Count)];
+                if (NavMesh.SamplePosition(seat + RingOffset(1.2f, 2.2f), out var hit, 1.5f, NavMesh.AllAreas)
+                    && DistXZ(hit.position, seat) > 0.55f)
+                {
+                    return hit.position;
+                }
+            }
+            if (AiTeacherManager.TryGetPodium(out Vector3 podium) && DistXZ(podium, classCenter) <= 12f
+                && NavMesh.SamplePosition(podium, out var hitPodium, 2f, NavMesh.AllAreas))
+            {
+                return hitPodium.position;
+            }
+            if (NavMesh.SamplePosition(classCenter, out var hitCenter, 2.5f, NavMesh.AllAreas))
+            {
+                return hitCenter.position;
+            }
+            return classCenter;
+        }
+
+        /// <summary>操场巡视点：随机挑一个学生，走向 TA 身边 1.2~2.2m 处</summary>
+        private static bool TryGetStudentWatchPoint(out Vector3 watch)
+        {
+            watch = default;
+            if (!UnitManager.IsSingletonActive()) return false;
+            var um = UnitManager.Instance;
+            Unit pick = null;
+            foreach (Unit player in um.playerList)
+            {
+                if (player != null && player.isPlayer && player.IsStudent && player.isActived && !player.IsDead
+                    && player.CurState() != 103)
+                {
+                    pick = player;
+                    if (UnityEngine.Random.value < 0.35f) break; // 别总挑第一个
+                }
+            }
+            if (pick == null)
+            {
+                foreach (Unit value in um.unitsDict.Values)
+                {
+                    if (value != null && value.isActived && value.UnitSubType == EUnitSubType.Student_NPC)
+                    {
+                        pick = value;
+                        if (UnityEngine.Random.value < 0.15f) break;
+                    }
+                }
+            }
+            if (pick == null) return false;
+            if (NavMesh.SamplePosition(pick.Position + RingOffset(1.2f, 2.2f), out var hit, 2f, NavMesh.AllAreas))
+            {
+                watch = hit.position;
+                return true;
+            }
+            return false;
+        }
+
+        /// <summary>环形偏移：min~max 距离的随机水平偏移（比满盘随机更容易落在走道而不是座位上）</summary>
+        private static Vector3 RingOffset(float min, float max)
+        {
+            float angle = UnityEngine.Random.value * Mathf.PI * 2f;
+            float r = UnityEngine.Random.Range(min, max);
+            return new Vector3(Mathf.Cos(angle) * r, 0f, Mathf.Sin(angle) * r);
         }
 
         private static Vector3 InsideCircle(float radius)
@@ -268,7 +610,7 @@ namespace AITeacher
             {
                 state = AiState.Patrol;
                 investigateStage = 0;
-                patrolPickAt = 0f;
+                hasPatrolPoint = false;
                 SetMoving(false);
                 return;
             }
@@ -293,6 +635,7 @@ namespace AITeacher
             if (chaseTarget == null || !IsValidStudent(chaseTarget))
             {
                 AiTeacherManager.ReleaseTarget(chaseTarget != null ? chaseTarget.UID : 0L, owner.UID);
+                ReleaseFocus("目标失效");
                 // 目标失效：若近内有别的线索就接上，否则去调查最后目击点
                 Unit next = AcquireTarget(out string reason);
                 if (next != null)
@@ -325,39 +668,104 @@ namespace AITeacher
             bool visible = IsVisible(chaseTarget);
             bool heard = AiTeacherManager.TryHearTrick(chaseTarget.UID, owner.Position, Cfg.hearingDistance, Cfg.suspicionMemory, out _);
             bool violating = Cfg.observeTrickItems && AiTeacherManager.IsViolating(chaseTarget.UID);
+            bool outSeat = Cfg.observeLeaveSeat && !AiTeacherManager.IsPlaygroundFloor()
+                && AiTeacherManager.IsOutOfSeat(chaseTarget.UID, Cfg.leaveSeatGrace);
 
             // 证据刷新：可见/可闻/持续违规都算；认领同步续期
-            if (visible || heard || violating)
+            if (visible || heard || violating || outSeat)
             {
                 RememberSeen(chaseTarget);
                 if (Cfg.cooperate) AiTeacherManager.ClaimTarget(chaseTarget.UID, owner.UID);
             }
 
-            // 晕眩了 → 冲刺抓捕
-            if (chaseTarget.IsStun)
+            // 追击卡死自救：想追但 3.5 秒没挪出 0.35m（最后几米路径不通、被桌椅卡住等）。
+            // 贴身传送到目标旁边——凝视/晕眩的目标本来就跑不了，传送是唯一可靠的开抓手段；
+            // 太远（>15m）或跨层传不了 → 放弃去调查，别把老师丢在自己到不了的地方
+            if (DistXZ(owner.Position, chaseStuckRefPos) > 0.35f)
             {
-                if (dist <= ConfigManager.TeacherSetting.arrestDistance)
+                chaseStuckRefPos = owner.Position;
+                chaseStuckSince = Time.unscaledTime;
+            }
+            else if (Time.unscaledTime - chaseStuckSince > 3.5f)
+            {
+                chaseStuckSince = Time.unscaledTime;
+                chaseStuckRefPos = owner.Position;
+                bool canWarpClose = dist <= 15f
+                    && Mathf.Abs(chaseTarget.Position.y - owner.Position.y) <= 2f;
+                NavMeshHit warpHit = default;
+                if (canWarpClose)
                 {
-                    TryCatch(chaseTarget);
+                    canWarpClose = NavMesh.SamplePosition(chaseTarget.Position + RingOffset(1.2f, 2.2f), out warpHit, 2f, NavMesh.AllAreas)
+                        && Mathf.Abs(warpHit.position.y - owner.Position.y) <= 2f;
                 }
-                else
+                if (canWarpClose)
                 {
-                    MoveTowards(chaseTarget.Position);
+                    ModEntry.Log?.Invoke($"[状态] AI 老师（UID={owner.UID}）追击卡住，贴身传送至目标 UID={chaseTarget.UID} 附近 {warpHit.position}");
+                    if (agent != null && agent.enabled && agent.isOnNavMesh)
+                    {
+                        agent.Warp(warpHit.position);
+                    }
+                    else
+                    {
+                        owner.SetPosition(warpHit.position);
+                    }
+                    return;
                 }
+                ModEntry.Log?.Invoke($"[状态] AI 老师（UID={owner.UID}）追不上目标 UID={chaseTarget.UID}，放弃去调查");
+                AiTeacherManager.ReleaseTarget(chaseTarget.UID, owner.UID);
+                ReleaseFocus("追不上");
+                investigatePos = lastSeenPos;
+                investigateUntil = Time.unscaledTime + 2f;
+                investigateStage = 0;
+                state = AiState.Investigate;
+                chaseTarget = null;
+                SetMoving(false);
                 return;
             }
 
-            // 攻击射程内且看得见（贴脸 2.5m 内无视角度）→ 打；粉笔按目标速度预判落点
-            float attackRange = (owner.ID == 1002) ? 2.4f : Cfg.visionDistance * 0.9f;
+            // 打晕才抓：原版抓捕服务端不校验晕眩也不校验距离（全靠客户端自觉），
+            // AI 讲武德：必须打晕 + 走到跟前（抓距封顶 2.5m，防房间规则抓距过大把人隔空拽过来）才拎
+            if (chaseTarget.IsStun && dist <= Mathf.Min(ConfigManager.TeacherSetting.arrestDistance, 2.5f))
+            {
+                TryCatch(chaseTarget);
+                return;
+            }
+
+            // 凝视：看得见但够不着的站立目标 → 冻结防跑（坐着/挂柱的学生 FSM 锁不上，跳过）
+            if (focusedUid == 0L && !chaseTarget.IsStun && visible && chaseTarget.CurState() != 100
+                && dist <= ConfigManager.TeacherSetting.focusDistance
+                && Time.unscaledTime >= nextFocusAt
+                && skill.currentSkillEnergy > Cfg.catchMinEnergy + ConfigManager.TeacherSetting.focusEnergyCost
+                && skill.UseSkillEnergy(ConfigManager.TeacherSetting.focusEnergyCost))
+            {
+                SendToSkillHandler(new UseSkillMessageRequest_C2S
+                {
+                    skillID = 2,
+                    targetUID = chaseTarget.UID,
+                    userUID = owner.UID
+                });
+                focusedUid = chaseTarget.UID;
+                focusedUntil = Time.unscaledTime + Cfg.focusMaxSeconds;
+                nextFocusAt = Time.unscaledTime + Cfg.focusMaxSeconds + 3f;
+                ModEntry.Log?.Invoke($"[状态] AI 老师（UID={owner.UID}）凝视学生 UID={chaseTarget.UID}");
+            }
+
+            // 攻击：被凝视的目标是冻住的活靶子更要打（打晕才能抓）；火线被桌椅挡住就别打（省体力），贴过去再打。
+            // 剑老师近战但剑气本身有射程，攻击距离放到 4m；粉笔老师按视野距离打
+            float attackRange = (owner.ID == 1002) ? 4f : Cfg.visionDistance * 0.9f;
             bool inSight = dist <= 2.5f || visible;
             if (Time.unscaledTime >= nextAttackAt && inSight && dist <= attackRange && skill.currentSkillEnergy > Cfg.catchMinEnergy)
             {
                 if (owner.ID == 1002)
                 {
-                    TrySword(headPos);
+                    if (IsFireLineClear(chaseTarget, headPos))
+                    {
+                        TrySword(headPos);
+                    }
                 }
                 else
                 {
+                    float chalkSpeed = ResolveChalkSpeed();
                     Vector3 aimPos = headPos;
                     if (Cfg.chalkLeadFactor > 0.01f)
                     {
@@ -366,11 +774,14 @@ namespace AITeacher
                         velocity.y = 0f;
                         if (velocity.sqrMagnitude > 0.01f)
                         {
-                            float flyTime = dist / Mathf.Max(1f, ConfigManager.TeacherSetting.chalkSpeed);
+                            float flyTime = dist / Mathf.Max(1f, chalkSpeed);
                             aimPos += velocity * (flyTime * Cfg.chalkLeadFactor);
                         }
                     }
-                    TryChalk(aimPos);
+                    if (IsFireLineClear(chaseTarget, aimPos))
+                    {
+                        TryChalk(aimPos, chalkSpeed);
+                    }
                 }
                 if (Time.unscaledTime < nextAttackAt) return; // 攻击成功，进入冷却
             }
@@ -390,6 +801,7 @@ namespace AITeacher
                     investigateStage = 0;
                     state = AiState.Investigate;
                     AiTeacherManager.ReleaseTarget(chaseTarget.UID, owner.UID);
+                    ReleaseFocus("跟丢");
                     chaseTarget = null;
                     SetMoving(false);
                 }
@@ -401,9 +813,14 @@ namespace AITeacher
         private void TryCatch(Unit student)
         {
             if (catchComp == null || catchComp.catchedUnitUID != 0L) return;
-            if (skill.currentSkillEnergy <= 0f) return;
+            if (skill.currentSkillEnergy <= 0f) return; // 对齐原版 CheckCatchEnergy：>0 即可抓
             if (Time.unscaledTime < nextCatchAt) return; // 抓捕请求节流，防服务器拒绝时刷屏
             nextCatchAt = Time.unscaledTime + 1f;
+            // 被凝视锁 FSM 的学生进不了 BeCatched 态：先解除（同连接消息有序，学生端先收到解锁再收到抓捕）
+            if (focusedUid == student.UID)
+            {
+                ReleaseFocus("转抓捕");
+            }
             var request = new UseSkillMessageRequest_C2S
             {
                 skillID = 3,
@@ -413,6 +830,21 @@ namespace AITeacher
             SendToSkillHandler(request);
             chaseTarget = null; // 目标已在手里，交给挂柱流程；同时停止追击加速
             ModEntry.Log?.Invoke($"[状态] AI 老师（UID={owner.UID}）抓捕学生 UID={student.UID}");
+        }
+
+        /// <summary>解除凝视：TeacherStopWatch 响应会把老师 returnView 置真，被凝视学生的 FSM 随即解锁</summary>
+        private void ReleaseFocus(string why)
+        {
+            if (focusedUid == 0L) return;
+            ulong uid = focusedUid;
+            focusedUid = 0L;
+            if (!MonoSingletonT<NetManager>.Instance.IsHost()) return; // AI 仅房主侧驱动
+            var connection = MonoSingletonT<RoomManager>.Instance.GetConnectByPlayerUID(MonoSingletonT<UnitManager>.Instance.localPlayerUID);
+            MonoSingletonT<RoomManager>.Instance.GetSkillMessageHandler().OnTeacherStopWatchMessageRequest(connection, new TeacherStopWatchMessageRequest_C2S
+            {
+                teacherUID = owner.UID
+            });
+            ModEntry.Log?.Invoke($"[状态] AI 老师（UID={owner.UID}）解除凝视 UID={uid}（{why}）");
         }
 
         private void TickBindPillar()
@@ -446,6 +878,7 @@ namespace AITeacher
                     noPillarSince = 0f;
                     state = AiState.Patrol;
                     chaseTarget = null;
+                    hasPatrolPoint = false;
                 }
                 return;
             }
@@ -464,13 +897,13 @@ namespace AITeacher
                 ModEntry.Log?.Invoke($"[状态] AI 老师（UID={owner.UID}）把学生 UID={catchComp.catchedUnitUID} 挂上罚站柱 UID={bestPillar.UID}");
                 state = AiState.Patrol;
                 chaseTarget = null;
-                patrolPickAt = 0f;
+                hasPatrolPoint = false;
             }
         }
 
         // ===== 攻击 =====
 
-        private void TryChalk(Vector3 targetHead)
+        private void TryChalk(Vector3 targetHead, float chalkSpeed)
         {
             Vector3 origin = owner.Position + Vector3.up * 1.5f;
             Vector3 dir = (targetHead - origin);
@@ -478,18 +911,19 @@ namespace AITeacher
             if (!skill.TryUseAttackEnergy(ERoomRuleId.TeacherFBXHTI)) return;
             animComp?.PlayAnim("Throw3");
             dir.Normalize();
-            dir = ApplySpread(dir);
+            dir = ApplySpread(dir, Vector3.Distance(targetHead, origin));
 
             Unit projectile = UnitManager.Instance.CreateCommonUnitDirectly(4002, origin, Vector3.zero, (ref UnitDataNet arg) =>
             {
                 arg.CreaterUID = owner.UID;
                 arg.ShootForward = dir;
-                arg.ShootSpeed = ConfigManager.TeacherSetting.chalkSpeed;
+                arg.ShootSpeed = chalkSpeed;
                 arg.EffectDuration = ConfigManager.TeacherSetting.chalkLifetime;
                 arg.IgnoreSync = true;
             });
             if (projectile == null) return;
             projectile.GetComponent<ProjectileComponent>()?.TrackChalkAchievement(owner.UID);
+            ModEntry.Log?.Invoke($"[状态] AI 老师（UID={owner.UID}）投粉笔 → 瞄准 {targetHead}");
             var sound = new PlaySoundRequest
             {
                 AudioName = AudioEvents.sfx_ChalkThrow_sfx,
@@ -524,14 +958,48 @@ namespace AITeacher
             // 注意：不能走 UnitMessageHandler.OnTeacherSlashFire——TeacherSlashSender 按 connection
             // 解析老师，AI 没有连接会被解析成房主本人。直调 AI unit 自己的组件：
             // HandleSlashFire 内部校验（序列/距离/体力）+ 广播 TeacherSlashFired_S2C，全端弹道确定性模拟
-            owner.GetComponent<TeacherMeleeComponent>()?.HandleSlashFire(request);
+            var melee = owner.GetComponent<TeacherMeleeComponent>();
+            if (melee == null)
+            {
+                ModEntry.Log?.Invoke("[警告] AI 老师挥剑失败：TeacherMeleeComponent 缺失");
+            }
+            else
+            {
+                // 剑模型/配置来自老师模型 prefab，没绑上会被 HandleSlashFire 静默拒绝——打日志定位
+                if (AccessTools.Field(typeof(TeacherMeleeComponent), "sword")?.GetValue(melee) == null
+                    || AccessTools.Field(typeof(TeacherMeleeComponent), "config")?.GetValue(melee) == null)
+                {
+                    ModEntry.Log?.Invoke("[警告] AI 老师挥剑异常：剑模型(sword)或近战配置(config)未绑定，剑气会被拒绝");
+                }
+                ModEntry.Log?.Invoke($"[状态] AI 老师（UID={owner.UID}）挥剑 → 起点 {origin} 方向 {dir}");
+            }
+            melee?.HandleSlashFire(request);
             float ruleCd = SingletonT<RoomRuleDataManager>.Instance.GetCurrentFloatValue(ERoomRuleId.UseSwordCD);
             nextAttackAt = Time.unscaledTime + Mathf.Max(Cfg.attackCooldown, ruleCd);
         }
 
-        private Vector3 ApplySpread(Vector3 dir)
+        /// <summary>粉笔飞行速度：对齐原版 ProjectileThrowSpeed——操场地图用操场专用速度</summary>
+        private static float ResolveChalkSpeed()
         {
-            float spread = Mathf.Max(0f, Cfg.chalkSpreadDeg);
+            return AiTeacherManager.IsPlaygroundFloor()
+                ? ConfigManager.TeacherSetting.playgroundChalkSpeed
+                : ConfigManager.TeacherSetting.chalkSpeed;
+        }
+
+        /// <summary>火线检查：用与粉笔一致的碰撞层（ChalkColliderMask）预演射线，桌椅/其他学生挡道就不打</summary>
+        private bool IsFireLineClear(Unit target, Vector3 aimPos)
+        {
+            Vector3 origin = owner.Position + Vector3.up * 1.5f;
+            Vector3 to = aimPos - origin;
+            float dist = to.magnitude;
+            if (dist < 0.01f) return false;
+            return !IsObstructed(origin, to / dist, dist, target);
+        }
+
+        private Vector3 ApplySpread(Vector3 dir, float dist)
+        {
+            // 贴脸必中、远处才散布：按距离线性放大到配置值
+            float spread = Mathf.Max(0f, Cfg.chalkSpreadDeg) * Mathf.Clamp01(dist / 8f);
             if (spread <= 0.01f) return dir;
             Quaternion rot = Quaternion.Euler(
                 UnityEngine.Random.Range(-spread, spread) * 0.5f,
