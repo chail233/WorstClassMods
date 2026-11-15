@@ -17,12 +17,24 @@ namespace TrickMole
     /// 其正向捣蛋计分乘以加成倍数（负分不乘，被抓照样扣）。
     /// 服务端选定后经自定义 Mirror 消息广播，所有端本地显示。
     /// </summary>
-    /// <summary>角色分配：服务端每名额广播一条（Version 全局单调递增）；UID=0 表示清空全部。</summary>
+    /// <summary>角色分配：服务端全量快照广播（Version 全局单调递增），客机整体替换分配表，杜绝增量漂移（重连残留/错过清场都会被下一条全量自愈）；空列表=清空。</summary>
     public struct MoleSelectMessage : NetworkMessage
     {
         public uint Version;
-        public ulong UnitUID;
-        public string RoleJson; // 角色参数（RoleDef 序列化）；服务端权威，客机直接用消息里的副本
+        public string AssignmentsJson; // 全量分配快照（MoleAssignList 序列化）；服务端权威，客机直接用消息里的副本
+    }
+
+    [Serializable]
+    public class MoleAssignEntry
+    {
+        public long uid;        // ulong 经 long 承载（JsonUtility 对 ulong 支持不稳）
+        public string roleJson; // RoleDef 序列化
+    }
+
+    [Serializable]
+    public class MoleAssignList
+    {
+        public List<MoleAssignEntry> entries = new List<MoleAssignEntry>();
     }
 
     /// <summary>Kind: 1=Start（C2S 请求/S2C 广播，S2C 带曲目与起点） 2=Stop（仅 S2C） 3=StopRequest（仅 C2S，手动停止/播完）</summary>
@@ -55,7 +67,7 @@ namespace TrickMole
         private const string HarmonyId = "worstclass.trickmole";
         private const int ClassStateChangedMsgId = 301;
 
-        // 本局角色分配：uid → 角色（服务端由配置分配，客机经 MoleSelectMessage.RoleJson 同步运行时副本）
+        // 本局角色分配：uid → 角色（服务端由配置分配，客机经 MoleSelectMessage.AssignmentsJson 全量快照同步运行时副本）
         internal static readonly Dictionary<ulong, RoleDef> assigned = new Dictionary<ulong, RoleDef>();
         // 捣蛋值累计（per-玩家，口径 = 该角色倍数后实际计入总进度的量）；被挂柱扣 2/3 并归零
         internal static readonly Dictionary<ulong, float> progressByUid = new Dictionary<ulong, float>();
@@ -216,6 +228,12 @@ namespace TrickMole
 
         // ===== 挂柱惩罚（对所有有捣蛋累计的角色生效） =====
 
+        // 学生被挂罚站柱的 FSM 状态（EUnitFsmStateType.StudentPunished），FSM 全端同步
+        private static bool IsPunished(Unit unit)
+        {
+            return unit != null && unit.isActived && unit.CurState() == (int)EUnitFsmStateType.StudentPunished;
+        }
+
         // PunishPillarComponent.OnResponseBindStudent 是绑定真正生效的点（版本校验通过才调用，
         // 全项目唯一调用处是服务端的绑定确认链路），同一绑定事件只会执行一次
         public static void AfterBindToPillar(Unit student)
@@ -301,6 +319,9 @@ namespace TrickMole
             var state = ClassroomManager.Instance.curState;
             if (state != EClassroomState.Prepare && state != EClassroomState.Classing) return;
             if (!UnitManager.IsSingletonActive()) return;
+            // 公平选人：Prepare 期间房间名册还有人没出生（场景加载中）就不选，避免先加载完的玩家稳拿角色；
+            // 倒计时结束进入 Classing 后兜底照选（缺席者这局没份，下局再算）
+            if (state == EClassroomState.Prepare && HasMissingRosterUnit()) return;
 
             List<RoleDef> slots = RoleConfig.ExpandSlots();
             if (slots.Count == 0) return;
@@ -317,25 +338,32 @@ namespace TrickMole
                 students.RemoveAt(pick);
                 assigned[chosen.UID] = role;
                 progressByUid[chosen.UID] = 0f;
-                BroadcastAssignment(chosen.UID, role);
                 Log("[状态] 本局角色已分配：" + role.name + " → " + chosen.GetPlayerUnitName());
             }
+            BroadcastAssignments();
         }
 
-        // 广播单个名额（Version 全局单调递增；重广播也递增让客户端覆盖同 uid 的旧记录）
-        private static void BroadcastAssignment(ulong uid, RoleDef role)
+        // 名册里还有玩家没出生（Unit 为空或未激活）= 有人在加载，选人不公平
+        private static bool HasMissingRosterUnit()
+        {
+            if (!RoomManager.IsSingletonActive()) return false;
+            Room room = RoomManager.Instance.CurrentRoom;
+            if (room == null) return false;
+            foreach (var unit in room.GetPlayers().Values)
+                if (unit == null || !unit.isActived) return true;
+            return false;
+        }
+
+        // 全量快照广播（Version 全局单调递增；空表=清空，重广播也递增让客户端无条件替换）
+        private static void BroadcastAssignments()
         {
             version++;
             if (!RoomManager.IsSingletonActive() || !NetworkServer.active) return;
+            var snapshot = new MoleAssignList();
+            foreach (var pair in assigned)
+                snapshot.entries.Add(new MoleAssignEntry { uid = (long)pair.Key, roleJson = JsonUtility.ToJson(pair.Value) });
             RoomManager.Instance.BroadcastToAllExceptHost(
-                new MoleSelectMessage { Version = version, UnitUID = uid, RoleJson = JsonUtility.ToJson(role) }, 0);
-        }
-
-        private static void BroadcastClearAll()
-        {
-            version++;
-            if (!RoomManager.IsSingletonActive() || !NetworkServer.active) return;
-            RoomManager.Instance.BroadcastToAllExceptHost(new MoleSelectMessage { Version = version, UnitUID = 0, RoleJson = null }, 0);
+                new MoleSelectMessage { Version = version, AssignmentsJson = JsonUtility.ToJson(snapshot) }, 0);
         }
 
         private static void OnClassStateChanged(EClassroomState state)
@@ -350,6 +378,8 @@ namespace TrickMole
                 musicCooldownRemain = 0f;
                 clientCooldownRemain = 0f;
                 clientPushCooldownRemain = 0f;
+                // Prepare 也广播清场（全量空表）：防客机错过上局清场后残留旧角色
+                if (NetRuntime.IsServer) BroadcastAssignments();
                 return;
             }
             if (state == EClassroomState.BeforeClass || state == EClassroomState.ClassFinish)
@@ -361,7 +391,7 @@ namespace TrickMole
                 clientCooldownRemain = 0f;
                 clientPushCooldownRemain = 0f;
                 if (NetRuntime.IsServer) StopMusicServer();
-                if (NetRuntime.IsServer) BroadcastClearAll();
+                if (NetRuntime.IsServer) BroadcastAssignments();
             }
         }
 
@@ -376,6 +406,8 @@ namespace TrickMole
                 : RoomManager.Instance.GetPlayerUIDByConnection(connection);
             if (moleUIDIsEmpty() || !assigned.TryGetValue(senderUID, out RoleDef role) || !role.canBroadcast) return;
             if (!ClassroomManager.IsSingletonActive() || ClassroomManager.Instance.curState != EClassroomState.Classing) return;
+            if (!UnitManager.IsSingletonActive()) return;
+            if (IsPunished(UnitManager.Instance.GetUnitByUID(senderUID))) return; // 被挂柱禁用技能
             if (message.Kind == MoleMusicMessage.Start)
             {
                 if (musicPlaying || musicCooldownRemain > 0f) return;
@@ -481,6 +513,15 @@ namespace TrickMole
             localPlayingMusic = audio;
         }
 
+        // 游戏当前生效的音乐音量 = 音乐设置 × 主音量（AudioBus.SetVolume 的同一口径）。
+        // 低级 Channel 挂进 bus:/BGM 的 channelGroup 后不吃 Studio Bus.setVolume，必须自己跟
+        private static float GameMusicVolume()
+        {
+            if (!MonoSingletonT<AudioManager>.IsSingletonActive()) return 1f;
+            var audio = MonoSingletonT<AudioManager>.Instance;
+            return Mathf.Clamp01(audio.GetMusicVolume() * audio._mainVolum);
+        }
+
         // 扩展曲低级播放（照 PlaygroundMusic 模式：挂 BGM 总线、3D 定位、按 Started 偏移进度）
         private static void PlayExtendedLocal(string path, double started, ulong uid)
         {
@@ -505,6 +546,7 @@ namespace TrickMole
             result = RuntimeManager.CoreSystem.playSound(moleSound, group, true, out moleChannel);
             if (result != RESULT.OK) { Log("混的入广播 playSound 失败: " + result); return; }
             moleHasChannel = true;
+            moleChannel.setVolume(GameMusicVolume()); // 跟随游戏音乐音量（之后每帧继续同步，滑条实时生效）
             if (elapsed > 0d) moleChannel.setPosition((uint)elapsed, TIMEUNIT.MS);
             var p = unit.Position;
             var pos = new VECTOR { x = p.x, y = p.y, z = p.z };
@@ -537,6 +579,7 @@ namespace TrickMole
             }
             if (playing)
             {
+                moleChannel.setVolume(GameMusicVolume()); // 每帧同步音量，设置滑条实时生效
                 if (UnitManager.IsSingletonActive())
                 {
                     Unit unit = UnitManager.Instance.GetUnitByUID(localPlayingUID);
@@ -622,6 +665,7 @@ namespace TrickMole
             Unit student = UnitManager.Instance.GetUnitByUID(senderUID);
             Unit teacher = UnitManager.Instance.GetUnitByUID(message.TeacherUID);
             if (student == null || !student.isActived || teacher == null || !teacher.isActived) return;
+            if (IsPunished(student)) return; // 被挂柱禁用技能
             if (!teacher.IsTeacher || teacher.IsDead || teacher.IsStun) return;
             if (!IsBehindAndClose(student, teacher, role)) return;
 
@@ -651,7 +695,7 @@ namespace TrickMole
         {
             if (!UnitManager.IsSingletonActive() || !ClassroomManager.IsSingletonActive()) return null;
             Unit self = UnitManager.Instance.GetUnitByUID(UnitManager.Instance.localPlayerUID);
-            if (self == null || !self.isActived) return null;
+            if (self == null || !self.isActived || IsPunished(self)) return null; // 被挂柱禁用技能（按键提示也随之隐藏）
             if (!assigned.TryGetValue(self.UID, out RoleDef role) || !role.canPush) return null;
             Unit best = null;
             float bestDist = role.pushRange;
@@ -692,6 +736,7 @@ namespace TrickMole
             ulong self = UnitManager.Instance.localPlayerUID;
             if (!assigned.TryGetValue(self, out RoleDef role) || !role.canPush) return;
             if (!ClassroomManager.IsSingletonActive() || ClassroomManager.Instance.curState != EClassroomState.Classing) return;
+            if (IsPunished(UnitManager.Instance.GetUnitByUID(self))) return; // 被挂柱禁用技能
             if (NetRuntime.IsServer
                 ? (pushCooldownUntil.TryGetValue(self, out float until) && Time.unscaledTime < until)
                 : clientPushCooldownRemain > 0f) return;
@@ -733,11 +778,29 @@ namespace TrickMole
         private static void OnMoleSelect(MoleSelectMessage message)
         {
             if (NetworkServer.active) return;
-            if (message.Version < version) return; // 过期消息（同 version 允许覆盖重广播）
+            if (message.Version < version) return; // 过期消息
+            List<MoleAssignEntry> entries;
+            try
+            {
+                entries = string.IsNullOrEmpty(message.AssignmentsJson)
+                    ? new List<MoleAssignEntry>()
+                    : JsonUtility.FromJson<MoleAssignList>(message.AssignmentsJson).entries;
+            }
+            catch { return; } // 畸形包不应用，等下一轮全量重广播自愈
             version = message.Version;
-            if (message.UnitUID == 0) { assigned.Clear(); return; }
-            RoleDef role = ParseRole(message.RoleJson);
-            if (role != null) assigned[message.UnitUID] = role;
+            // 全量替换：客机分配表与服务端严格一致，不会残留旧角色
+            assigned.Clear();
+            foreach (MoleAssignEntry entry in entries)
+            {
+                if (entry.uid == 0) continue;
+                RoleDef role = ParseRole(entry.roleJson);
+                if (role != null) assigned[(ulong)entry.uid] = role;
+            }
+            // 失去角色的捣蛋累计一并清掉（本地 UI 口径）
+            var stale = new List<ulong>();
+            foreach (ulong uid in progressByUid.Keys)
+                if (!assigned.ContainsKey(uid)) stale.Add(uid);
+            foreach (ulong uid in stale) progressByUid.Remove(uid);
         }
 
         private static RoleDef ParseRole(string json)
@@ -757,8 +820,8 @@ namespace TrickMole
                 if (assigned.Count > 0 && Time.unscaledTime >= nextRepublish)
                 {
                     nextRepublish = Time.unscaledTime + 10f;
-                    // 中途加入的玩家靠重广播补齐（每个名额一条，Version 递增覆盖）
-                    foreach (var pair in assigned) BroadcastAssignment(pair.Key, pair.Value);
+                    // 重连/中途加入的玩家靠全量重广播自愈（整表替换，Version 递增）
+                    BroadcastAssignments();
                 }
                 TickServerMusic(Time.unscaledDeltaTime);
             }
@@ -780,6 +843,7 @@ namespace TrickMole
             ulong self = UnitManager.Instance.localPlayerUID;
             if (!assigned.TryGetValue(self, out RoleDef role) || !role.canBroadcast) return;
             if (!ClassroomManager.IsSingletonActive() || ClassroomManager.Instance.curState != EClassroomState.Classing) return;
+            if (IsPunished(UnitManager.Instance.GetUnitByUID(self))) return; // 被挂柱禁用技能
             if (!MonoSingletonT<InputManager>.IsSingletonActive() || MonoSingletonT<InputManager>.Instance.FrozedPlayerInput || MonoSingletonT<InputManager>.Instance.FrozedAllInput) return;
             if (!ReInput.isReady) return;
             Keyboard keyboard = ReInput.players.GetPlayer(0).controllers.Keyboard;

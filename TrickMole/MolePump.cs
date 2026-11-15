@@ -32,6 +32,13 @@ namespace TrickMole
                 lines.Add(pair.Value.name + "：" + who);
             }
 
+            // 本地玩家被挂罚站柱 → 技能禁用提示（FSM 状态全端同步）
+            bool punished = ModEntry.MyRole != null
+                && UnitManager.Instance.GetUnitByUID(UnitManager.Instance.localPlayerUID) is Unit self
+                && self.isActived
+                && self.CurState() == (int)EUnitFsmStateType.StudentPunished;
+            if (punished) lines.Add("被挂罚站中，技能禁用");
+
             var area = new Rect(Screen.width - 250f, 10f, 250f, 40f + 24f * (lines.Count + 2));
             var battleView = SingletonT<UIManager>.Instance.GetOpenUI(EUIWindowType.BattleMain) as UIBattleMainView;
             if (battleView != null && battleView.countDownContainer is RectTransform countRt && countRt.gameObject.activeInHierarchy)
@@ -55,9 +62,9 @@ namespace TrickMole
                 GUILayout.Label("捣蛋分数 ×" + myRole.trickMultiplier.ToString("0.#") + "　被挂扣累计 " + (myRole.progressPenaltyFraction * 100f).ToString("0") + "%");
                 GUILayout.Label("捣蛋累计：" + ModEntry.MyProgress.ToString("0.#"));
                 if (ModEntry.musicPlaying) GUILayout.Label(myRole.canBroadcast ? "广播播放中…再按 " + ModEntry.MusicKey.ToString() + " 停止" : "广播播放中…");
-                else if (myRole.canBroadcast && state == EClassroomState.Classing && ModEntry.ClientCooldownRemain > 0f) GUILayout.Label("广播冷却中…");
-                else if (myRole.canBroadcast && state == EClassroomState.Classing) GUILayout.Label("按 " + ModEntry.MusicKey.ToString() + " 播放广播（曲库 " + (ModEntry.MusicPool.Length + PmBridge.SharedTrackCount) + " 首）");
-                if (myRole.canPush && state == EClassroomState.Classing && ModEntry.PushCooldownRemain > 0f) GUILayout.Label("推倒冷却中… " + Mathf.CeilToInt(ModEntry.PushCooldownRemain) + "s");
+                else if (myRole.canBroadcast && state == EClassroomState.Classing && !punished && ModEntry.ClientCooldownRemain > 0f) GUILayout.Label("广播冷却中…");
+                else if (myRole.canBroadcast && state == EClassroomState.Classing && !punished) GUILayout.Label("按 " + ModEntry.MusicKey.ToString() + " 播放广播（曲库 " + (ModEntry.MusicPool.Length + PmBridge.SharedTrackCount) + " 首）");
+                if (myRole.canPush && state == EClassroomState.Classing && !punished && ModEntry.PushCooldownRemain > 0f) GUILayout.Label("推倒冷却中… " + Mathf.CeilToInt(ModEntry.PushCooldownRemain) + "s");
             }
             GUILayout.EndVertical();
             GUILayout.EndArea();
@@ -72,8 +79,7 @@ namespace TrickMole
         internal static void WriteMole(NetworkWriter writer, MoleSelectMessage message)
         {
             writer.WriteUInt(message.Version);
-            writer.WriteULong(message.UnitUID);
-            writer.WriteString(message.RoleJson);
+            writer.WriteString(message.AssignmentsJson);
         }
 
         internal static MoleSelectMessage ReadMole(NetworkReader reader)
@@ -81,8 +87,7 @@ namespace TrickMole
             return new MoleSelectMessage
             {
                 Version = reader.ReadUInt(),
-                UnitUID = reader.ReadULong(),
-                RoleJson = reader.ReadString()
+                AssignmentsJson = reader.ReadString()
             };
         }
 
