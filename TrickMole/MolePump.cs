@@ -12,7 +12,7 @@ namespace TrickMole
 
         private void OnDestroy() { ModEntry.Cleanup(); }
 
-        // 右上角常驻提示盒（避开左上角曲库检测按钮），行数随角色数自适应
+        // 右上角常驻提示盒：贴在游戏下课倒计时左边（倒计时 UI 取不到时退回右贴边），行数随角色数自适应
         private static void Draw()
         {
             if (ModEntry.AssignedCount == 0) return;
@@ -33,6 +33,19 @@ namespace TrickMole
             }
 
             var area = new Rect(Screen.width - 250f, 10f, 250f, 40f + 24f * (lines.Count + 2));
+            var battleView = SingletonT<UIManager>.Instance.GetOpenUI(EUIWindowType.BattleMain) as UIBattleMainView;
+            if (battleView != null && battleView.countDownContainer is RectTransform countRt && countRt.gameObject.activeInHierarchy)
+            {
+                var corners = new Vector3[4];
+                countRt.GetWorldCorners(corners);
+                Canvas canvas = countRt.GetComponentInParent<Canvas>();
+                Camera cam = canvas != null && canvas.renderMode != RenderMode.ScreenSpaceOverlay ? canvas.worldCamera : null;
+                float minX = float.MaxValue;
+                foreach (var corner in corners)
+                    minX = Mathf.Min(minX, RectTransformUtility.WorldToScreenPoint(cam, corner).x);
+                // 倒计时左边留 24px 间隙；窗口过窄放不下就保持右贴边不挪
+                if (minX > 260f) area.x = minX - 24f - 250f;
+            }
             GUI.Box(area, "");
             GUILayout.BeginArea(new Rect(area.x + 8f, area.y + 8f, area.width - 16f, area.height - 16f));
             GUILayout.BeginVertical(GUI.skin.box);

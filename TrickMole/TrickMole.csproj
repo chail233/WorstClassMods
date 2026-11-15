@@ -7,4 +7,12 @@
     <RootNamespace>TrickMole</RootNamespace>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!-- 提示盒定位读取下课倒计时 UI：Canvas / RenderMode / RectTransformUtility -->
+    <Reference Include="UnityEngine.UIModule">
+      <HintPath>$(ManagedDir)\UnityEngine.UIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
 </Project>
