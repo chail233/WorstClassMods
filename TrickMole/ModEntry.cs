@@ -34,6 +34,14 @@ namespace TrickMole
         public double Started;      // 统一播放起点（NetRuntime.SessionTime），扩展曲进度对齐用
     }
 
+    /// <summary>Kind: 1=Request（仅 C2S，学生→老师推倒请求） 2=Apply（仅 S2C，服务端校验通过后广播）</summary>
+    public struct MolePushMessage : NetworkMessage
+    {
+        public const byte Request = 1, Apply = 2;
+        public byte Kind;
+        public ulong TeacherUID;
+    }
+
     public sealed class ModEntry : IMod
     {
         internal static Action<string> Log;
@@ -41,7 +49,12 @@ namespace TrickMole
         internal const float BonusMultiplier = 2f;
         internal const float ScoreGraceSeconds = 3f;   // 起播后前几秒不计分
         internal const float MusicCooldownSeconds = 20f; // 停止后的冷却
+        internal const float PushCooldownSeconds = 30f;  // 推倒老师的冷却
+        internal const float PushStunSeconds = 2.5f;     // 老师倒地时长
+        internal const float PushRange = 2.2f;           // 触发距离
+        internal const float PushBehindDot = -0.35f;     // 背后判定：学生方向与老师朝向点积上限（≈110°身后扇区）
         internal static readonly KeyCode MusicKey = KeyCode.B;
+        internal static readonly KeyCode PushKey = KeyCode.E;
         internal static readonly AudioEvents[] MusicPool = { AudioEvents.bgm_YuAi, AudioEvents.bgm_Hajimi1, AudioEvents.bgm_Hajimi2, AudioEvents.bgm_YuAids };
         private const string HarmonyId = "worstclass.trickmole";
         private const int ClassStateChangedMsgId = 301;
@@ -73,8 +86,13 @@ namespace TrickMole
         // 被挂柱 → 总体进度扣其 2/3，记录归零；每节课开始重置
         internal static float moleProgress;
 
+        // 推倒技能冷却：服务端权威 + 客机本地倒计时（收到 Apply 时启动）
+        private static float pushCooldownRemain;
+        private static float clientPushCooldownRemain;
+
         // UI 用的冷却剩余（房主读服务端权威值，客机读本地倒计时）
         internal static float ClientCooldownRemain => NetRuntime.IsServer ? musicCooldownRemain : clientCooldownRemain;
+        internal static float PushCooldownRemain => NetRuntime.IsServer ? pushCooldownRemain : clientPushCooldownRemain;
 
         // ===== 操场特判：混的入广播期间静音广播柱（状态机不动，恢复零成本） =====
 
@@ -126,6 +144,8 @@ namespace TrickMole
                 Reader<MoleSelectMessage>.read = MolePump.ReadMole;
                 Writer<MoleMusicMessage>.write = MolePump.WriteMusic;
                 Reader<MoleMusicMessage>.read = MolePump.ReadMusic;
+                Writer<MolePushMessage>.write = MolePump.WritePush;
+                Reader<MolePushMessage>.read = MolePump.ReadPush;
                 RegisterClient();
                 RegisterServer();
 
@@ -266,6 +286,8 @@ namespace TrickMole
                 moleProgress = 0f;
                 musicCooldownRemain = 0f;
                 clientCooldownRemain = 0f;
+                pushCooldownRemain = 0f;
+                clientPushCooldownRemain = 0f;
                 return;
             }
             if (state == EClassroomState.BeforeClass || state == EClassroomState.ClassFinish)
@@ -274,6 +296,8 @@ namespace TrickMole
                 moleProgress = 0f;
                 musicCooldownRemain = 0f;
                 clientCooldownRemain = 0f;
+                pushCooldownRemain = 0f;
+                clientPushCooldownRemain = 0f;
                 if (NetRuntime.IsServer) StopMusicServer();
                 if (NetRuntime.IsServer) BroadcastState();
             }
@@ -518,17 +542,120 @@ namespace TrickMole
             RoomManager.Instance.BroadcastToAllExceptHost(new MoleSelectMessage { Version = version, UnitUID = moleUID }, 0);
         }
 
+        // ===== 推倒老师技能（背后 + 按 E） =====
+
+        // 服务端：校验推倒请求（身份/状态/冷却/目标合法/距离/背后）
+        private static void OnServerPush(NetworkConnectionToClient connection, MolePushMessage message)
+        {
+            if (!NetRuntime.IsServer || message.Kind != MolePushMessage.Request) return;
+            ulong senderUID = connection == null || connection == NetworkServer.localConnection
+                ? MonoSingletonT<UnitManager>.Instance.localPlayerUID
+                : RoomManager.Instance.GetPlayerUIDByConnection(connection);
+            if (senderUID != moleUID || moleUID == 0) return;
+            if (!ClassroomManager.IsSingletonActive() || ClassroomManager.Instance.curState != EClassroomState.Classing) return;
+            if (pushCooldownRemain > 0f) return;
+            if (!UnitManager.IsSingletonActive()) return;
+            Unit student = UnitManager.Instance.GetUnitByUID(senderUID);
+            Unit teacher = UnitManager.Instance.GetUnitByUID(message.TeacherUID);
+            if (student == null || !student.isActived || teacher == null || !teacher.isActived) return;
+            if (!teacher.IsTeacher || teacher.IsDead || teacher.IsStun) return;
+            if (!IsBehindAndClose(student, teacher)) return;
+
+            pushCooldownRemain = PushCooldownSeconds;
+            var broadcast = new MolePushMessage { Kind = MolePushMessage.Apply, TeacherUID = teacher.UID };
+            if (RoomManager.IsSingletonActive() && NetworkServer.active) RoomManager.Instance.BroadcastToAllExceptHost(broadcast, 0);
+            PushApplyLocal(teacher.UID);
+            Log("[状态] 混的入从背后推倒了老师");
+        }
+
+        // 背后且近距离：学生位于老师身后约 110° 扇区内且距离 ≤ PushRange
+        private static bool IsBehindAndClose(Unit student, Unit teacher)
+        {
+            Vector3 toStudent = student.Position - teacher.Position;
+            toStudent.y = 0f;
+            if (toStudent.magnitude > PushRange) return false;
+            Vector3 fwd = teacher.transform.forward;
+            fwd.y = 0f;
+            if (fwd.sqrMagnitude < 0.0001f) return true; // 朝向缺失时不额外限制
+            return Vector3.Dot(fwd.normalized, toStudent.normalized) < PushBehindDot;
+        }
+
+        // 找本地玩家身后最近的老师（按键预判定，服务端会再完整校验）
+        private static Unit FindPushTarget()
+        {
+            if (!UnitManager.IsSingletonActive() || !ClassroomManager.IsSingletonActive()) return null;
+            Unit self = UnitManager.Instance.GetUnitByUID(UnitManager.Instance.localPlayerUID);
+            if (self == null || !self.isActived) return null;
+            Unit best = null;
+            float bestDist = PushRange;
+            foreach (var unit in UnitManager.Instance.playerList)
+            {
+                if (unit == null || !unit.isActived || !unit.IsTeacher || unit.IsDead || unit.IsStun) continue;
+                if (!IsBehindAndClose(self, unit)) continue;
+                float dist = Vector3.Distance(self.Position, unit.Position);
+                if (dist < bestDist) { bestDist = dist; best = unit; }
+            }
+            return best;
+        }
+
+        // 各端应用：老师倒地 2.5 秒（TryGetProjectileStun 带精确时长，Stun 动画与滑倒一致，tip 自动清理）
+        private static void PushApplyLocal(ulong teacherUID)
+        {
+            if (!UnitManager.IsSingletonActive()) return;
+            Unit teacher = UnitManager.Instance.GetUnitByUID(teacherUID);
+            if (teacher == null || !teacher.IsTeacher) return;
+            teacher.GetComponent<TeacherStunComponent>()?.TryGetProjectileStun(PushStunSeconds);
+        }
+
+        // 客机：收到 Apply → 本地应用 + 启动冷却倒计时（服务端本机走 PushApplyLocal）
+        private static void OnClientPush(MolePushMessage message)
+        {
+            if (NetworkServer.active) return;
+            if (message.Kind != MolePushMessage.Apply) return;
+            clientPushCooldownRemain = PushCooldownSeconds;
+            PushApplyLocal(message.TeacherUID);
+        }
+
+        // 本地玩家是混的入时，按 E 对背后老师发起推倒（房主直接服务端处理）
+        private static void HandlePushKey()
+        {
+            if (moleUID == 0) return;
+            if (!UnitManager.IsSingletonActive() || UnitManager.Instance.localPlayerUID != moleUID) return;
+            if (!ClassroomManager.IsSingletonActive() || ClassroomManager.Instance.curState != EClassroomState.Classing) return;
+            if (NetRuntime.IsServer ? pushCooldownRemain > 0f : clientPushCooldownRemain > 0f) return;
+            if (!MonoSingletonT<InputManager>.IsSingletonActive() || MonoSingletonT<InputManager>.Instance.FrozedPlayerInput || MonoSingletonT<InputManager>.Instance.FrozedAllInput) return;
+            if (!ReInput.isReady) return;
+            Keyboard keyboard = ReInput.players.GetPlayer(0).controllers.Keyboard;
+            if (keyboard == null || !keyboard.GetKeyDown(PushKey)) return;
+            Unit target = FindPushTarget();
+            if (target == null) return;
+            if (NetRuntime.IsServer)
+            {
+                pushCooldownRemain = PushCooldownSeconds;
+                var broadcast = new MolePushMessage { Kind = MolePushMessage.Apply, TeacherUID = target.UID };
+                if (RoomManager.IsSingletonActive() && NetworkServer.active) RoomManager.Instance.BroadcastToAllExceptHost(broadcast, 0);
+                PushApplyLocal(target.UID);
+                Log("[状态] 混的入从背后推倒了老师");
+            }
+            else
+            {
+                RoomManager.Instance.SendToServer(new MolePushMessage { Kind = MolePushMessage.Request, TeacherUID = target.UID });
+            }
+        }
+
         // ===== 消息注册与处理 =====
 
         public static void RegisterClient()
         {
             NetworkClient.RegisterHandler<MoleSelectMessage>(OnMoleSelect, true);
             NetworkClient.RegisterHandler<MoleMusicMessage>(OnClientMusic, true);
+            NetworkClient.RegisterHandler<MolePushMessage>(OnClientPush, true);
         }
 
         public static void RegisterServer()
         {
             NetworkServer.RegisterHandler<MoleMusicMessage>(OnServerMusic, true);
+            NetworkServer.RegisterHandler<MolePushMessage>(OnServerPush, true);
         }
 
         private static void OnMoleSelect(MoleSelectMessage message)
@@ -553,14 +680,17 @@ namespace TrickMole
                     BroadcastState(); // 中途加入的玩家靠重广播补齐
                 }
                 TickServerMusic(Time.unscaledDeltaTime);
+                if (pushCooldownRemain > 0f) pushCooldownRemain = Math.Max(0f, pushCooldownRemain - Time.unscaledDeltaTime);
             }
-            else if (clientCooldownRemain > 0f)
+            else
             {
-                clientCooldownRemain = Math.Max(0f, clientCooldownRemain - Time.unscaledDeltaTime);
+                if (clientCooldownRemain > 0f) clientCooldownRemain = Math.Max(0f, clientCooldownRemain - Time.unscaledDeltaTime);
+                if (clientPushCooldownRemain > 0f) clientPushCooldownRemain = Math.Max(0f, clientPushCooldownRemain - Time.unscaledDeltaTime);
             }
             MuteLowLevelChannels(musicPlaying);
             TickMusicPlayback();
             HandleMusicKey();
+            HandlePushKey();
         }
 
         // 本地玩家是混的入时，按 B 开关广播（房主直接本地处理）

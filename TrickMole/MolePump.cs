@@ -25,13 +25,20 @@ namespace TrickMole
             bool isSelf = UnitManager.Instance.localPlayerUID == ModEntry.moleUID;
 
             // 外层 Area 高度留裕量（最多 4 行内容），内容用 box 自适应，防高 DPI 裁切
-            var area = new Rect(Screen.width - 250f, 10f, 240f, 110f);
+            var area = new Rect(Screen.width - 250f, 10f, 240f, 135f);
             GUI.Box(area, "");
             GUILayout.BeginArea(new Rect(area.x + 8f, area.y + 8f, area.width - 16f, area.height - 16f));
             GUILayout.BeginVertical(GUI.skin.box);
             GUILayout.Label(isSelf ? "你是本局的混的入！" : "本局混的入：" + name);
             GUILayout.Label("捣蛋分数 ×" + ModEntry.BonusMultiplier + "　被挂总进度扣累计 2/3");
             if (isSelf) GUILayout.Label("捣蛋累计：" + ModEntry.moleProgress.ToString("0.#"));
+            if (isSelf && state == EClassroomState.Classing)
+            {
+                string pushTip = ModEntry.PushCooldownRemain > 0f
+                    ? "推倒冷却中… " + Mathf.CeilToInt(ModEntry.PushCooldownRemain) + "s"
+                    : "按 " + ModEntry.PushKey.ToString() + " 推倒老师（背后）";
+                GUILayout.Label(pushTip);
+            }
             if (ModEntry.musicPlaying) GUILayout.Label(isSelf ? "广播播放中…再按 " + ModEntry.MusicKey.ToString() + " 停止" : "广播播放中…");
             else if (isSelf && state == EClassroomState.Classing && ModEntry.ClientCooldownRemain > 0f) GUILayout.Label("广播冷却中…");
             else if (isSelf && state == EClassroomState.Classing) GUILayout.Label("按 " + ModEntry.MusicKey.ToString() + " 播放广播（曲库 " + (ModEntry.MusicPool.Length + PmBridge.SharedTrackCount) + " 首）");
@@ -70,6 +77,21 @@ namespace TrickMole
                 AudioEvent = reader.ReadUInt(),
                 Hash = reader.ReadString(),
                 Started = reader.ReadDouble()
+            };
+        }
+
+        internal static void WritePush(NetworkWriter writer, MolePushMessage message)
+        {
+            writer.WriteByte(message.Kind);
+            writer.WriteULong(message.TeacherUID);
+        }
+
+        internal static MolePushMessage ReadPush(NetworkReader reader)
+        {
+            return new MolePushMessage
+            {
+                Kind = reader.ReadByte(),
+                TeacherUID = reader.ReadULong()
             };
         }
     }
