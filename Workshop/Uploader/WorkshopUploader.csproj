@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- 创意工坊上传器：独立控制台工具，不是游戏 Mod。
+       复用游戏自带的 Steamworks.NET.dll + steam_api64.dll，走桌面 Steam 客户端已登录会话，
+       无需 SteamCMD，也不输入账号密码。 -->
+
+  <PropertyGroup>
+    <!-- 非 Mod 工具：跳过共享 targets 的 CopyToMods 部署，覆盖共享 props 的 netstandard2.1 -->
+    <IsGameMod>false</IsGameMod>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>WorkshopUploader</AssemblyName>
+    <RootNamespace>WorkshopUploader</RootNamespace>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 直接引用游戏自带的 Steamworks.NET（版本与 steam_api64.dll 严格配套） -->
+    <Reference Include="com.rlabrecque.steamworks.net">
+      <HintPath>$(GameDir)\Worst Class Ever_Data\Managed\com.rlabrecque.steamworks.net.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- Steamworks.NET DllImport("steam_api64")，运行时需要它在程序目录 -->
+  <Target Name="CopySteamApiDll" AfterTargets="Build">
+    <Copy SourceFiles="$(GameDir)\Worst Class Ever_Data\Plugins\x86_64\steam_api64.dll"
+          DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>

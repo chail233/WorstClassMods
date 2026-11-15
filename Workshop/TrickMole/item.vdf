@@ -1,0 +1,11 @@
+"workshopitem"
+{
+    "appid"           "5175310"
+    "publishedfileid" "3840179450"
+    "content"         "D:\WorstClassMod\Workshop\.content\TrickMole"
+    "title"           "课堂角色：混的入"
+    "description"     "多角色玩法框架：每节课按配置随机分配角色。当前角色：混的入（全员可见身份）。\n\n[list]\n[*]捣蛋分数 ×2，单独统计捣蛋值累计\n[*]被老师挂上罚站柱时，总体进度扣除累计捣蛋值的 2/3、记录归零（个人贡献分不动），挂柱期间广播/推倒技能禁用\n[*]上课按 B 开关 3D 广播音乐：跟随玩家移动，音量随游戏音乐设置，起播前 3 秒不计分，停止后冷却 20 秒\n[*]在老师身后按 E 可将其推倒 2.5 秒，冷却 30 秒\n[/list]\n广播曲库自动接入操场音乐扩展（取交集）；混的入广播播放期间操场广播柱静音且暂停计分。\n\n[b]配置[/b]\nLocalLow 下 Configs/trickmole/trickmole.json 可加角色、调数值。\n\n[b]联机说明[/b]\n所有玩家需安装本 Mod（涉及网络消息同步），版本必须保持一致。"
+    "visibility"      "0"
+    "previewfile"     "D:\WorstClassMod\Workshop\TrickMole\preview.png"
+    "changenote"      "v2.1.0 修复：客机可能残留假混的入（改全量同步）；被挂柱期间禁用广播/推倒技能；扩展曲音量随游戏音乐设置；选人改为等全员加载完再随机（更公平）。注意：联机所有玩家需同步更新"
+}

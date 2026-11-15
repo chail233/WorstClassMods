@@ -12,3 +12,7 @@ obj/
 *.mp3
 *.wav
 *.ogg
+
+# Workshop scaffolding local artifacts (steamcmd fallback + content staging)
+Workshop/steamcmd/
+Workshop/.content/

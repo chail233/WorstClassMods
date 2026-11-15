@@ -1,0 +1,11 @@
+"workshopitem"
+{
+    "appid"           "5175310"
+    "publishedfileid" "3840179548"
+    "content"         "D:\WorstClassMod\Workshop\.content\AITeacher"
+    "title"           "AI老师"
+    "description"     "电脑控制的老师。纯房主侧 Mod：[b]其他玩家无需安装[/b]即可看到 AI 老师移动、攻击与抓人。\n\n[list]\n[*]F8 面板设定 AI 老师数量（0~房间规则老师数），AI 与真人老师共存且总数不超房间设置\n[*]难度四档：宽松 / 标准 / 严格 / 地狱（一键切换视野、听力、反应、移速、散布预设）\n[*]形态：随机 / 粉笔 / 剑\n[*]老师位不足时由 AI 补足，单人也能按铃开课正常玩一局\n[*]开课前会自己从办公室走进教室站好位，不会整节课待在办公室\n[*]巡逻偏向历史捣蛋热点；视野内看到学生手持捣蛋物品/玩电脑立即追；听见捣蛋计分即知位置\n[*]粉笔按目标跑动方向预判落点；多个 AI 目标认领去重不挤同一个学生；抓晕眩学生挂罚站柱\n[/list]\n移速默认跟随房间规则与真人老师同速。数值可在 LocalLow 下 Configs/aiteacher/aiteacher.json 手调。"
+    "visibility"      "0"
+    "previewfile"     "D:\WorstClassMod\Workshop\AITeacher\preview.png"
+    "changenote"      "首次发布：AI 老师数量/难度/形态可调，纯房主侧无需全员安装"
+}

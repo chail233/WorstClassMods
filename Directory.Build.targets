@@ -5,8 +5,9 @@
     <ModOutDir>$(GameDir)\Mods\$(AssemblyName)</ModOutDir>
   </PropertyGroup>
 
-  <!-- 构建后把 DLL + mod.json + Music 目录一起部署到 Mods\<程序集名>\ -->
-  <Target Name="CopyToMods" AfterTargets="Build">
+  <!-- 构建后把 DLL + mod.json + Music 目录一起部署到 Mods\<程序集名>\
+       非 Mod 工具（如 Workshop/Uploader）在 csproj 里设 IsGameMod=false 跳过部署 -->
+  <Target Name="CopyToMods" AfterTargets="Build" Condition="'$(IsGameMod)' != 'false'">
     <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(ModOutDir)\" />
     <Copy SourceFiles="$(MSBuildProjectDirectory)\mod.json" DestinationFolder="$(ModOutDir)\" Condition="Exists('$(MSBuildProjectDirectory)\mod.json')" />
     <ItemGroup Condition="Exists('$(MSBuildProjectDirectory)\Music')">

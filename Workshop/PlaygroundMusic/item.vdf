@@ -1,0 +1,11 @@
+"workshopitem"
+{
+    "appid"           "5175310"
+    "publishedfileid"         "3840179058"
+    "content"         "D:\WorstClassMod\Workshop\.content\PlaygroundMusic"
+    "title"           "外高音乐扩展"
+    "description"     "扩展操场广播柱曲库：支持本地自定义 MP3、缺失曲目检测与全员共有曲目播放。\n\n[b]使用[/b]\n[list]\n[*]MP3 放入 Mods/PlaygroundMusic/Music/ 目录（本物品自带曲目示例）\n[*]联机时自动取所有玩家曲库的交集播放，缺曲自动检测并提示\n[/list]\n\n[b]联机说明[/b]\n所有玩家需安装本 Mod（涉及网络消息同步），版本保持一致。\n\n与课堂角色 Mod 联动：混的入的 3D 广播也会接入本扩展曲库。"
+    "visibility"      "0"
+    "previewfile"     "D:\WorstClassMod\Workshop\PlaygroundMusic\preview.png"
+    "changenote"      "首次发布：操场广播曲库扩展，支持自定义 MP3 与全员曲库协商"
+}
