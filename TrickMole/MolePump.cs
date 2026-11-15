@@ -34,10 +34,9 @@ namespace TrickMole
             if (isSelf) GUILayout.Label("捣蛋累计：" + ModEntry.moleProgress.ToString("0.#"));
             if (isSelf && state == EClassroomState.Classing)
             {
-                string pushTip = ModEntry.PushCooldownRemain > 0f
-                    ? "推倒冷却中… " + Mathf.CeilToInt(ModEntry.PushCooldownRemain) + "s"
-                    : "按 " + ModEntry.PushKey.ToString() + " 推倒老师（背后）";
-                GUILayout.Label(pushTip);
+                // 冷却倒计时留在身份盒里；可推时的按键提示走 KeyHint 原生样式浮层（中央偏右下）
+                if (ModEntry.PushCooldownRemain > 0f) GUILayout.Label("推倒冷却中… " + Mathf.CeilToInt(ModEntry.PushCooldownRemain) + "s");
+                else if (ModEntry.HasPushTarget()) KeyHint.Prompt(ModEntry.PushKey, "推倒老师");
             }
             if (ModEntry.musicPlaying) GUILayout.Label(isSelf ? "广播播放中…再按 " + ModEntry.MusicKey.ToString() + " 停止" : "广播播放中…");
             else if (isSelf && state == EClassroomState.Classing && ModEntry.ClientCooldownRemain > 0f) GUILayout.Label("广播冷却中…");

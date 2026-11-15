@@ -580,7 +580,9 @@ namespace TrickMole
             return Vector3.Dot(fwd.normalized, toStudent.normalized) < PushBehindDot;
         }
 
-        // 找本地玩家身后最近的老师（按键预判定，服务端会再完整校验）
+        // 找本地玩家身后最近的老师（按键预判定与 UI 提示共用，服务端会再完整校验）
+        internal static bool HasPushTarget() => FindPushTarget() != null;
+
         private static Unit FindPushTarget()
         {
             if (!UnitManager.IsSingletonActive() || !ClassroomManager.IsSingletonActive()) return null;
