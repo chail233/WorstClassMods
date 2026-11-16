@@ -57,6 +57,14 @@ namespace TrickMole
         public ulong TeacherUID;
     }
 
+    /// <summary>Kind: 1=Gained（免伤就绪） 2=Consumed（挡下一次老师攻击后消耗）</summary>
+    public struct MoleImmunityMessage : NetworkMessage
+    {
+        public const byte Gained = 1, Consumed = 2;
+        public byte Kind;
+        public ulong StudentUID;
+    }
+
     public sealed class ModEntry : IMod
     {
         internal static Action<string> Log;
@@ -73,6 +81,10 @@ namespace TrickMole
         internal static readonly Dictionary<ulong, float> progressByUid = new Dictionary<ulong, float>();
         // 推倒冷却（服务端 per-玩家，绝对截止时间）；version 单调递增供客户端丢弃过期消息
         private static readonly Dictionary<ulong, float> pushCooldownUntil = new Dictionary<ulong, float>();
+        // 免伤（书呆子类角色）：静心计时（秒）+ 免伤次数。各端按同一条计分事件流本地维护，
+        // 服务端在获得/消耗时广播，客机以此对齐
+        private static readonly Dictionary<ulong, float> immunityIdle = new Dictionary<ulong, float>();
+        private static readonly Dictionary<ulong, int> immunityCharges = new Dictionary<ulong, int>();
         internal static uint version;
         private static float nextRepublish;
         private static bool registeredStateHook;
@@ -108,12 +120,32 @@ namespace TrickMole
             }
         }
 
-        internal static float MyProgress
+        internal static bool RoleHasImmunity(RoleDef role)
+        {
+            return role != null && role.maxImmunityCharges > 0 && role.immunityIdleSeconds > 0f;
+        }
+
+        // 本地玩家免伤次数 / 静心剩余（UI 用；各端本地维护，服务端获得与消耗时广播对齐）
+        internal static int MyImmunityCharges
+        {
+            get
+            {
+                if (!UnitManager.IsSingletonActive()) return 0;
+                return immunityCharges.TryGetValue(UnitManager.Instance.localPlayerUID, out int v) ? v : 0;
+            }
+        }
+
+        internal static float MyImmunityRemaining
         {
             get
             {
                 if (!UnitManager.IsSingletonActive()) return 0f;
-                return progressByUid.TryGetValue(UnitManager.Instance.localPlayerUID, out float v) ? v : 0f;
+                ulong uid = UnitManager.Instance.localPlayerUID;
+                if (immunityCharges.TryGetValue(uid, out int charges) && charges > 0) return 0f;
+                RoleDef role = MyRole;
+                if (!RoleHasImmunity(role)) return 0f;
+                float idle = immunityIdle.TryGetValue(uid, out float v) ? v : 0f;
+                return Mathf.Max(0f, role.immunityIdleSeconds - idle);
             }
         }
 
@@ -171,7 +203,7 @@ namespace TrickMole
             var harmony = new Harmony(HarmonyId);
             try
             {
-                // 唯一计分入口：正向加分时给混的入乘倍数（原方法照常执行）
+                // 唯一计分入口：正向加分时按角色倍数缩放（混的入 ×2、书呆子 ×0.5，原方法照常执行）
                 harmony.Patch(
                     AccessTools.Method(typeof(ClassroomManager), "OnResponseTrickCountData"),
                     prefix: new HarmonyMethod(typeof(ModEntry), "BeforeTrickCount"));
@@ -186,6 +218,16 @@ namespace TrickMole
                 harmony.Patch(
                     AccessTools.Method(typeof(ClassroomMessageHandler), "AwardPlaygroundMusicScore"),
                     prefix: new HarmonyMethod(typeof(ModEntry), "BeforeAwardMusicScore"));
+                // 老师攻击落到书呆子身上：消耗一次免伤并拦下攻击（抓捕 / 粉笔剑气 / 客机眩晕上报）
+                harmony.Patch(
+                    AccessTools.Method(typeof(SkillMessageHandler), "OnUseSkillMessageRequest"),
+                    prefix: new HarmonyMethod(typeof(ModEntry), "BeforeUseSkillRequest"));
+                harmony.Patch(
+                    AccessTools.Method(typeof(StudentStunComponent), "GetStun"),
+                    prefix: new HarmonyMethod(typeof(ModEntry), "BeforeStudentStun"));
+                harmony.Patch(
+                    AccessTools.Method(typeof(UnitMessageHandler), "OnStudentGetStunRequest"),
+                    prefix: new HarmonyMethod(typeof(ModEntry), "BeforeStudentStunRequest"));
                 // 消息注册挂到游戏自己的注册时机之后（防重注册清掉）
                 harmony.Patch(AccessTools.Method(typeof(RoomManager), "RegisterClientMessageHandlers"), postfix: new HarmonyMethod(typeof(ModEntry), "RegisterClient"));
                 harmony.Patch(AccessTools.Method(typeof(RoomManager), "RegisterServerMessageHandlers"), postfix: new HarmonyMethod(typeof(ModEntry), "RegisterServer"));
@@ -195,6 +237,8 @@ namespace TrickMole
                 Reader<MoleMusicMessage>.read = MolePump.ReadMusic;
                 Writer<MolePushMessage>.write = MolePump.WritePush;
                 Reader<MolePushMessage>.read = MolePump.ReadPush;
+                Writer<MoleImmunityMessage>.write = MolePump.WriteImmunity;
+                Reader<MoleImmunityMessage>.read = MolePump.ReadImmunity;
                 RegisterClient();
                 RegisterServer();
 
@@ -202,7 +246,7 @@ namespace TrickMole
                 MsgCenter.Register<EClassroomState>(ClassStateChangedMsgId, OnClassStateChanged);
                 registeredStateHook = true;
 
-                var pump = new GameObject("混的入提示");
+                var pump = new GameObject("课堂角色提示");
                 UnityEngine.Object.DontDestroyOnLoad(pump);
                 pump.AddComponent<MolePump>();
             }
@@ -223,6 +267,12 @@ namespace TrickMole
             {
                 count *= role.trickMultiplier;
                 progressByUid[uid] = (progressByUid.TryGetValue(uid, out float v) ? v : 0f) + count; // 记录实际计入总进度的量
+                // 捣蛋即失去免伤并重新静心（各端从同一计分入口执行，状态天然同步）
+                if (RoleHasImmunity(role))
+                {
+                    immunityIdle[uid] = 0f;
+                    immunityCharges[uid] = 0;
+                }
             }
         }
 
@@ -238,11 +288,14 @@ namespace TrickMole
         // 全项目唯一调用处是服务端的绑定确认链路），同一绑定事件只会执行一次
         public static void AfterBindToPillar(Unit student)
         {
-            if (student == null) return;
+            if (student == null || student.UID == 0) return;
+            // 被老师制服：免伤一并作废，之后从静心重新积攒
+            immunityIdle.Remove(student.UID);
+            immunityCharges.Remove(student.UID);
             if (!NetRuntime.IsServer)
             {
                 // 客机：角色扮演者被挂 → 本地记录同步归零（扣分本身由服务端经计分广播同步）
-                if (student.UID != 0 && progressByUid.ContainsKey(student.UID)) progressByUid[student.UID] = 0f;
+                if (progressByUid.ContainsKey(student.UID)) progressByUid[student.UID] = 0f;
                 return;
             }
             if (!assigned.ContainsKey(student.UID)) return;
@@ -375,6 +428,8 @@ namespace TrickMole
                 assigned.Clear();
                 progressByUid.Clear();
                 pushCooldownUntil.Clear();
+                immunityIdle.Clear();
+                immunityCharges.Clear();
                 musicCooldownRemain = 0f;
                 clientCooldownRemain = 0f;
                 clientPushCooldownRemain = 0f;
@@ -387,6 +442,8 @@ namespace TrickMole
                 assigned.Clear();
                 progressByUid.Clear();
                 pushCooldownUntil.Clear();
+                immunityIdle.Clear();
+                immunityCharges.Clear();
                 musicCooldownRemain = 0f;
                 clientCooldownRemain = 0f;
                 clientPushCooldownRemain = 0f;
@@ -760,6 +817,108 @@ namespace TrickMole
             }
         }
 
+        // ===== 免伤（书呆子类角色）：静心一段时间获得一次"免疫老师攻击" =====
+
+        // 各端本地推进静心计时；服务端负责消费，获得/消耗都靠广播对齐
+        private static void TickImmunity(float dt)
+        {
+            if (assigned.Count == 0) return;
+            if (!ClassroomManager.IsSingletonActive() || ClassroomManager.Instance.curState != EClassroomState.Classing) return;
+            foreach (var pair in assigned)
+            {
+                RoleDef role = pair.Value;
+                if (!RoleHasImmunity(role)) continue;
+                ulong uid = pair.Key;
+                int cap = Mathf.Max(1, role.maxImmunityCharges);
+                int charges = immunityCharges.TryGetValue(uid, out int c) ? c : 0;
+                if (charges >= cap) continue;
+                float idle = (immunityIdle.TryGetValue(uid, out float v) ? v : 0f) + dt;
+                if (idle < role.immunityIdleSeconds)
+                {
+                    immunityIdle[uid] = idle;
+                    continue;
+                }
+                immunityIdle[uid] = 0f;
+                immunityCharges[uid] = charges + 1;
+                if (NetRuntime.IsServer) BroadcastImmunity(MoleImmunityMessage.Gained, uid);
+            }
+        }
+
+        // 服务端：消耗一次免伤；返回 true 表示调用方应拦下这次老师攻击
+        private static bool TryConsumeImmunity(ulong studentUID)
+        {
+            if (!NetRuntime.IsServer) return false;
+            if (!assigned.TryGetValue(studentUID, out RoleDef role) || !RoleHasImmunity(role)) return false;
+            int charges = immunityCharges.TryGetValue(studentUID, out int c) ? c : 0;
+            if (charges <= 0) return false;
+            immunityCharges[studentUID] = charges - 1;
+            immunityIdle[studentUID] = 0f;
+            BroadcastImmunity(MoleImmunityMessage.Consumed, studentUID);
+            Log("[状态] " + role.name + "免疫了一次老师攻击（剩余免伤 " + (charges - 1) + " 次）");
+            return true;
+        }
+
+        private static void BroadcastImmunity(byte kind, ulong uid)
+        {
+            var message = new MoleImmunityMessage { Kind = kind, StudentUID = uid };
+            if (RoomManager.IsSingletonActive() && NetworkServer.active)
+                RoomManager.Instance.BroadcastToAllExceptHost(message, 0);
+            ApplyImmunity(message);
+        }
+
+        private static void ApplyImmunity(MoleImmunityMessage message)
+        {
+            ulong uid = message.StudentUID;
+            if (message.Kind == MoleImmunityMessage.Gained)
+            {
+                if (assigned.TryGetValue(uid, out RoleDef role) && RoleHasImmunity(role))
+                    immunityCharges[uid] = Mathf.Max(1, role.maxImmunityCharges);
+                immunityIdle[uid] = 0f;
+                return;
+            }
+            immunityCharges[uid] = 0;
+            immunityIdle[uid] = 0f;
+            if (!MonoSingletonT<GameNotifyManager>.IsSingletonActive()) return;
+            MonoSingletonT<GameNotifyManager>.Instance.ShowCommonNotify("好学生下手要轻点啊！", null, 3f);
+        }
+
+        // ===== 老师攻击拦截（仅服务端；拦下后全员都不会进入被抓/眩晕流程） =====
+
+        // 抓捕（skillID=3）：OnUseSkillMessageRequest 是唯一的服务端入口
+        public static bool BeforeUseSkillRequest(UseSkillMessageRequest_C2S request)
+        {
+            if (!NetRuntime.IsServer || request.skillID != 3) return true;
+            if (!IsValidCatch(request.userUID, request.targetUID)) return true;
+            return !TryConsumeImmunity(request.targetUID);
+        }
+
+        // 复刻原方法的关键校验，避免伪造请求白吃掉书呆子的免伤
+        private static bool IsValidCatch(ulong teacherUID, ulong studentUID)
+        {
+            if (!UnitManager.IsSingletonActive()) return false;
+            Unit teacher = UnitManager.Instance.GetUnitByUID(teacherUID);
+            Unit student = UnitManager.Instance.GetUnitByUID(studentUID);
+            return teacher != null && student != null && teacher != student
+                && teacher.isActived && student.isActived && teacher.IsTeacher && student.IsStudent
+                && !teacher.IsDead && !student.IsDead;
+        }
+
+        // 粉笔/剑气/橡皮擦：房主端直接结算时走 GetStun（香蕉皮滑倒不属于老师攻击）
+        public static bool BeforeStudentStun(StudentStunComponent __instance, EStunType stunType)
+        {
+            if (!NetRuntime.IsServer || stunType == EStunType.Banana) return true;
+            Unit owner = __instance.owner;
+            if (owner == null || !owner.IsStudent) return true;
+            return !TryConsumeImmunity(owner.UID);
+        }
+
+        // 客机老师客户端命中后上报的眩晕请求，服务端广播前拦下
+        public static bool BeforeStudentStunRequest(StudentGetStunRequest_C2S request)
+        {
+            if (!request.isStun || request.stunType == EStunType.Banana) return true;
+            return !TryConsumeImmunity(request.unitUID);
+        }
+
         // ===== 消息注册与处理 =====
 
         public static void RegisterClient()
@@ -767,6 +926,7 @@ namespace TrickMole
             NetworkClient.RegisterHandler<MoleSelectMessage>(OnMoleSelect, true);
             NetworkClient.RegisterHandler<MoleMusicMessage>(OnClientMusic, true);
             NetworkClient.RegisterHandler<MolePushMessage>(OnClientPush, true);
+            NetworkClient.RegisterHandler<MoleImmunityMessage>(OnClientImmunity, true);
         }
 
         public static void RegisterServer()
@@ -796,17 +956,33 @@ namespace TrickMole
                 RoleDef role = ParseRole(entry.roleJson);
                 if (role != null) assigned[(ulong)entry.uid] = role;
             }
-            // 失去角色的捣蛋累计一并清掉（本地 UI 口径）
-            var stale = new List<ulong>();
+            // 失去角色的捣蛋累计与免伤状态一并清掉（本地 UI 口径）
+            var stale = new HashSet<ulong>();
             foreach (ulong uid in progressByUid.Keys)
                 if (!assigned.ContainsKey(uid)) stale.Add(uid);
-            foreach (ulong uid in stale) progressByUid.Remove(uid);
+            foreach (ulong uid in immunityIdle.Keys)
+                if (!assigned.ContainsKey(uid)) stale.Add(uid);
+            foreach (ulong uid in immunityCharges.Keys)
+                if (!assigned.ContainsKey(uid)) stale.Add(uid);
+            foreach (ulong uid in stale)
+            {
+                progressByUid.Remove(uid);
+                immunityIdle.Remove(uid);
+                immunityCharges.Remove(uid);
+            }
         }
 
         private static RoleDef ParseRole(string json)
         {
             try { return string.IsNullOrEmpty(json) ? null : JsonUtility.FromJson<RoleDef>(json); }
             catch { return null; }
+        }
+
+        // 客机：收到免伤状态变更（获得/消耗），本地对齐并弹提示
+        private static void OnClientImmunity(MoleImmunityMessage message)
+        {
+            if (NetworkServer.active) return;
+            ApplyImmunity(message);
         }
 
         // ===== 服务端每帧驱动 =====
@@ -830,6 +1006,7 @@ namespace TrickMole
                 if (clientCooldownRemain > 0f) clientCooldownRemain = Math.Max(0f, clientCooldownRemain - Time.unscaledDeltaTime);
                 if (clientPushCooldownRemain > 0f) clientPushCooldownRemain = Math.Max(0f, clientPushCooldownRemain - Time.unscaledDeltaTime);
             }
+            TickImmunity(Time.unscaledDeltaTime);
             MuteLowLevelChannels(musicPlaying);
             TickMusicPlayback();
             HandleMusicKey();

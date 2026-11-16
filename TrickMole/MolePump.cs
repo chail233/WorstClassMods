@@ -32,12 +32,31 @@ namespace TrickMole
                 lines.Add(pair.Value.name + "：" + who);
             }
 
-            // 本地玩家被挂罚站柱 → 技能禁用提示（FSM 状态全端同步）
-            bool punished = ModEntry.MyRole != null
+            // 本地玩家被挂罚站柱 → 技能禁用提示（FSM 状态全端同步；免伤是被动技能，不受此限）
+            bool punished = myRole != null
+                && (myRole.canBroadcast || myRole.canPush)
                 && UnitManager.Instance.GetUnitByUID(UnitManager.Instance.localPlayerUID) is Unit self
                 && self.isActived
                 && self.CurState() == (int)EUnitFsmStateType.StudentPunished;
             if (punished) lines.Add("被挂罚站中，技能禁用");
+
+            // 只给本地玩家自己的角色追加技能状态；其他人的角色只出现在上面的名单里
+            if (myRole != null && state == EClassroomState.Classing)
+            {
+                if (ModEntry.RoleHasImmunity(myRole))
+                {
+                    if (ModEntry.MyImmunityCharges > 0) lines.Add("免伤就绪：下一次老师攻击无效（捣蛋即失效）");
+                    else lines.Add("静心充能中，还剩 " + Mathf.CeilToInt(ModEntry.MyImmunityRemaining) + " 秒获得免伤");
+                }
+                if (myRole.canBroadcast)
+                {
+                    if (ModEntry.musicPlaying) lines.Add("广播播放中…再按 " + ModEntry.MusicKey + " 停止");
+                    else if (!punished && ModEntry.ClientCooldownRemain > 0f) lines.Add("广播冷却中…");
+                    else if (!punished) lines.Add("按 " + ModEntry.MusicKey + " 播放广播（曲库 " + (ModEntry.MusicPool.Length + PmBridge.SharedTrackCount) + " 首）");
+                }
+                if (myRole.canPush && !punished && ModEntry.PushCooldownRemain > 0f)
+                    lines.Add("推倒冷却中… " + Mathf.CeilToInt(ModEntry.PushCooldownRemain) + "s");
+            }
 
             var area = new Rect(Screen.width - 250f, 10f, 250f, 40f + 24f * (lines.Count + 2));
             var battleView = SingletonT<UIManager>.Instance.GetOpenUI(EUIWindowType.BattleMain) as UIBattleMainView;
@@ -57,15 +76,6 @@ namespace TrickMole
             GUILayout.BeginArea(new Rect(area.x + 8f, area.y + 8f, area.width - 16f, area.height - 16f));
             GUILayout.BeginVertical(GUI.skin.box);
             foreach (string line in lines) GUILayout.Label(line);
-            if (myRole != null)
-            {
-                GUILayout.Label("捣蛋分数 ×" + myRole.trickMultiplier.ToString("0.#") + "　被挂扣累计 " + (myRole.progressPenaltyFraction * 100f).ToString("0") + "%");
-                GUILayout.Label("捣蛋累计：" + ModEntry.MyProgress.ToString("0.#"));
-                if (ModEntry.musicPlaying) GUILayout.Label(myRole.canBroadcast ? "广播播放中…再按 " + ModEntry.MusicKey.ToString() + " 停止" : "广播播放中…");
-                else if (myRole.canBroadcast && state == EClassroomState.Classing && !punished && ModEntry.ClientCooldownRemain > 0f) GUILayout.Label("广播冷却中…");
-                else if (myRole.canBroadcast && state == EClassroomState.Classing && !punished) GUILayout.Label("按 " + ModEntry.MusicKey.ToString() + " 播放广播（曲库 " + (ModEntry.MusicPool.Length + PmBridge.SharedTrackCount) + " 首）");
-                if (myRole.canPush && state == EClassroomState.Classing && !punished && ModEntry.PushCooldownRemain > 0f) GUILayout.Label("推倒冷却中… " + Mathf.CeilToInt(ModEntry.PushCooldownRemain) + "s");
-            }
             GUILayout.EndVertical();
             GUILayout.EndArea();
 
@@ -115,6 +125,7 @@ namespace TrickMole
         internal static void WritePush(NetworkWriter writer, MolePushMessage message)
         {
             writer.WriteByte(message.Kind);
+            writer.WriteULong(message.StudentUID);
             writer.WriteULong(message.TeacherUID);
         }
 
@@ -123,7 +134,23 @@ namespace TrickMole
             return new MolePushMessage
             {
                 Kind = reader.ReadByte(),
+                StudentUID = reader.ReadULong(),
                 TeacherUID = reader.ReadULong()
+            };
+        }
+
+        internal static void WriteImmunity(NetworkWriter writer, MoleImmunityMessage message)
+        {
+            writer.WriteByte(message.Kind);
+            writer.WriteULong(message.StudentUID);
+        }
+
+        internal static MoleImmunityMessage ReadImmunity(NetworkReader reader)
+        {
+            return new MoleImmunityMessage
+            {
+                Kind = reader.ReadByte(),
+                StudentUID = reader.ReadULong()
             };
         }
     }

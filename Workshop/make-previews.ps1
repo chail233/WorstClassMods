@@ -165,7 +165,7 @@ New-Preview -OutPath (Join-Path $root 'PlaygroundMusic\preview.png') `
     -Tag 'Worst Class Ever Mod' -ColorTop '#3A1C71' -ColorBottom '#D76D77' -Decorate $musicDeco
 
 New-Preview -OutPath (Join-Path $root 'TrickMole\preview.png') `
-    -Title '课堂角色：混的入' -Subtitle '捣蛋 ×2 · 3D 广播 · 老师背后按 E 推倒' `
+    -Title '课堂角色' -Subtitle '每局随机分配身份 · 角色与数值均可配置扩展' `
     -Tag 'Worst Class Ever Mod' -ColorTop '#2E5339' -ColorBottom '#17281D' -Decorate $chalkDeco
 
 New-Preview -OutPath (Join-Path $root 'AITeacher\preview.png') `
