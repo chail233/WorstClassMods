@@ -1,0 +1,48 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- 生化模式：挂柱超时感染变小老师，学生吹箭筒反击老师，教师团队 HP/体力体系。共享属性/引用/部署见上层 Directory.Build.props 与 targets -->
+
+  <PropertyGroup>
+    <AssemblyName>BioChem</AssemblyName>
+    <RootNamespace>BioChem</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 吹箭筒弹道：Physics.SphereCastNonAlloc / LayerMask -->
+    <Reference Include="UnityEngine.PhysicsModule">
+      <HintPath>$(ManagedDir)\UnityEngine.PhysicsModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- 吹箭开火：Input.GetMouseButtonDown / mousePosition -->
+    <Reference Include="UnityEngine.InputLegacyModule">
+      <HintPath>$(ManagedDir)\UnityEngine.InputLegacyModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- 提示盒定位读取下课倒计时 UI：Canvas / RectTransformUtility -->
+    <Reference Include="UnityEngine.UIModule">
+      <HintPath>$(ManagedDir)\UnityEngine.UIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- 管理面板：UGUI 控件（Image/Button/Text/CanvasScaler/GraphicRaycaster）；EventSystems 命名空间也在此程序集（c1 变体未拆分） -->
+    <Reference Include="UnityEngine.UI">
+      <HintPath>$(ManagedDir)\UnityEngine.UI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- 管理面板克隆窗框时剥掉 Animator -->
+    <Reference Include="UnityEngine.AnimationModule">
+      <HintPath>$(ManagedDir)\UnityEngine.AnimationModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- 吹箭筒配置表：cfg.Tables/TbItem（BeanBase 基类在 Luban.Runtime） -->
+    <Reference Include="Luban.Runtime">
+      <HintPath>$(ManagedDir)\Luban.Runtime.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- 拉起游戏设置窗口：UIManager.ShowUI 返回 UniTask<>，返回值类型所在程序集必须引用（CS0012） -->
+    <Reference Include="UniTask">
+      <HintPath>$(ManagedDir)\UniTask.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>
