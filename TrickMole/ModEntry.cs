@@ -429,11 +429,100 @@ namespace TrickMole
         {
             version++;
             if (!RoomManager.IsSingletonActive() || !NetworkServer.active) return;
-            var snapshot = new MoleAssignList();
-            foreach (var pair in assigned)
-                snapshot.entries.Add(new MoleAssignEntry { uid = (long)pair.Key, roleJson = JsonUtility.ToJson(pair.Value) });
+            string json = BuildAssignmentsJson();
             RoomManager.Instance.BroadcastToAllExceptHost(
-                new MoleSelectMessage { Version = version, AssignmentsJson = JsonUtility.ToJson(snapshot) }, 0);
+                new MoleSelectMessage { Version = version, AssignmentsJson = json }, 0);
+            // 诊断：内容变化必打，稳定重广播每 60 秒打一次（与遥测/客机日志对账用）
+            if (json != lastBroadcastJson || Time.unscaledTime >= nextBroadcastLog)
+            {
+                lastBroadcastJson = json;
+                nextBroadcastLog = Time.unscaledTime + 60f;
+                Log("[状态] 广播角色快照 v" + version + "：" + assigned.Count + " 条，JSON " + (json != null ? json.Length : 0) + " 字节"
+                    + (assigned.Count > 0 && string.IsNullOrEmpty(json) ? "（异常：有分配但快照为空！）" : ""));
+            }
+        }
+
+        private static string lastBroadcastJson;
+        private static float nextBroadcastLog;
+
+        // 手工拼角色快照 JSON：不再走 JsonUtility 序列化。
+        // 工坊 2.3.x 主机端实测 JsonUtility.ToJson(快照) 稳定返回空串（主机自己不解析这个 JSON 所以毫无感知，
+        // 客机收到的全是 {版本,空串} 空包 → 右上角无名单、角色效果全失效）。字段名与 JsonUtility 完全一致，客机解析不变。
+        private static string BuildAssignmentsJson()
+        {
+            var sb = new System.Text.StringBuilder(96 + assigned.Count * 512);
+            sb.Append("{\"entries\":[");
+            bool first = true;
+            foreach (var pair in assigned)
+            {
+                if (!first) sb.Append(',');
+                first = false;
+                sb.Append("{\"uid\":").Append((long)pair.Key).Append(",\"roleJson\":")
+                  .Append(EncodeJsonString(BuildRoleJson(pair.Value))).Append('}');
+            }
+            sb.Append("]}");
+            return sb.ToString();
+        }
+
+        // 手工拼 RoleDef：字段名/顺序与 JsonUtility 一致，客机 FromJson<RoleDef> 直接可读；
+        // 客机侧旧版本缺字段时按 JsonUtility 规则读回 0/false，天然向前兼容
+        private static string BuildRoleJson(RoleDef role)
+        {
+            if (role == null) return "{}";
+            var sb = new System.Text.StringBuilder(256);
+            sb.Append("{\"id\":").Append(EncodeJsonString(role.id));
+            sb.Append(",\"name\":").Append(EncodeJsonString(role.name));
+            sb.Append(",\"count\":").Append(role.count);
+            sb.Append(",\"trickMultiplier\":").Append(JsonFloat(role.trickMultiplier));
+            sb.Append(",\"canBroadcast\":").Append(role.canBroadcast ? "true" : "false");
+            sb.Append(",\"canPush\":").Append(role.canPush ? "true" : "false");
+            sb.Append(",\"scoreGraceSeconds\":").Append(JsonFloat(role.scoreGraceSeconds));
+            sb.Append(",\"musicCooldownSeconds\":").Append(JsonFloat(role.musicCooldownSeconds));
+            sb.Append(",\"pushStunSeconds\":").Append(JsonFloat(role.pushStunSeconds));
+            sb.Append(",\"pushCooldownSeconds\":").Append(JsonFloat(role.pushCooldownSeconds));
+            sb.Append(",\"pushRange\":").Append(JsonFloat(role.pushRange));
+            sb.Append(",\"pushBehindDot\":").Append(JsonFloat(role.pushBehindDot));
+            sb.Append(",\"progressPenaltyFraction\":").Append(JsonFloat(role.progressPenaltyFraction));
+            sb.Append(",\"immunityIdleSeconds\":").Append(JsonFloat(role.immunityIdleSeconds));
+            sb.Append(",\"maxImmunityCharges\":").Append(role.maxImmunityCharges);
+            sb.Append(",\"speedBoostUnseen\":").Append(JsonFloat(role.speedBoostUnseen));
+            sb.Append(",\"speedPenaltySeen\":").Append(JsonFloat(role.speedPenaltySeen));
+            sb.Append(",\"actionSpeedMultiplier\":").Append(JsonFloat(role.actionSpeedMultiplier));
+            sb.Append(",\"sightAngleDegrees\":").Append(JsonFloat(role.sightAngleDegrees));
+            sb.Append(",\"sightDistance\":").Append(JsonFloat(role.sightDistance));
+            return sb.ToString();
+        }
+
+        // float 必须固定用不变文化输出（区域设置带逗号小数点的机器会拼出非法 JSON）
+        private static string JsonFloat(float value)
+        {
+            if (float.IsNaN(value) || float.IsInfinity(value)) return "0";
+            return value.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        // JSON 字符串字面量（含首尾引号）：只转义反斜杠/双引号/控制字符，中文原样输出
+        private static string EncodeJsonString(string value)
+        {
+            if (value == null) return "\"\"";
+            var sb = new System.Text.StringBuilder(value.Length + 8);
+            sb.Append('"');
+            foreach (char c in value)
+            {
+                switch (c)
+                {
+                    case '\\': sb.Append("\\\\"); break;
+                    case '"': sb.Append("\\\""); break;
+                    case '\n': sb.Append("\\n"); break;
+                    case '\r': sb.Append("\\r"); break;
+                    case '\t': sb.Append("\\t"); break;
+                    default:
+                        if (c < ' ') sb.Append("\\u").Append(((int)c).ToString("x4"));
+                        else sb.Append(c);
+                        break;
+                }
+            }
+            sb.Append('"');
+            return sb.ToString();
         }
 
         private static void OnClassStateChanged(EClassroomState state)
