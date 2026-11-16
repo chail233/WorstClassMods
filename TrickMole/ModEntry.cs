@@ -943,10 +943,19 @@ namespace TrickMole
         private static readonly Dictionary<ulong, (int frame, bool seen)> athleteSightCache = new Dictionary<ulong, (int, bool)>();
         private static RaycastHit[] sightHits = new RaycastHit[16];
 
+        // 体育生加成只覆盖对局窗口（Prepare/Classing）：下课、回大厅、中途退出后 assigned 残留时不再加成
+        private static bool InClassWindow()
+        {
+            if (!ClassroomManager.IsSingletonActive()) return false;
+            EClassroomState state = ClassroomManager.Instance.curState;
+            return state == EClassroomState.Prepare || state == EClassroomState.Classing;
+        }
+
         // 移速唯一出口在本地玩家自己的 InputComponent 上（各端算各端的人物，无需广播）
         public static void AfterMoveSpeed(InputComponent __instance, ref float __result)
         {
             if (__result <= 0f) return;
+            if (!InClassWindow()) return;
             Unit owner = __instance.owner;
             if (owner == null || !owner.isLocalPlayer || owner.IsDead || !owner.IsStudent) return;
             if (!assigned.TryGetValue(owner.UID, out RoleDef role)) return;
@@ -965,6 +974,7 @@ namespace TrickMole
         public static void BeforeItemUseTick(StudentItemUseComponent __instance, bool ____isHoldingUse, ref float iDt)
         {
             if (!____isHoldingUse || iDt <= 0f) return;
+            if (!InClassWindow()) return;
             Unit owner = __instance.owner;
             if (owner == null || !owner.isLocalPlayer) return;
             Unit held = __instance.currentHoldUnit;
@@ -977,7 +987,7 @@ namespace TrickMole
         public static void AfterRescueDuration(ref float __result)
         {
             if (__result <= 0f) return;
-            if (!UnitManager.IsSingletonActive()) return;
+            if (!InClassWindow()) return;
             if (!assigned.TryGetValue(UnitManager.Instance.localPlayerUID, out RoleDef role) || role.actionSpeedMultiplier <= 0f) return;
             __result /= role.actionSpeedMultiplier;
         }
