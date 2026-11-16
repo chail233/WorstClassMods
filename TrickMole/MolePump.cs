@@ -48,6 +48,21 @@ namespace TrickMole
                     if (ModEntry.MyImmunityCharges > 0) lines.Add("免伤就绪：下一次老师攻击无效（捣蛋即失效）");
                     else lines.Add("静心充能中，还剩 " + Mathf.CeilToInt(ModEntry.MyImmunityRemaining) + " 秒获得免伤");
                 }
+                if (myRole.speedBoostUnseen > 0f || myRole.speedPenaltySeen > 0f)
+                {
+                    Unit selfUnit = UnitManager.Instance.GetUnitByUID(UnitManager.Instance.localPlayerUID);
+                    if (selfUnit != null && selfUnit.isActived && !selfUnit.IsDead)
+                    {
+                        if (ModEntry.IsSeenByAnyTeacher(selfUnit, myRole))
+                        {
+                            if (myRole.speedPenaltySeen > 0f) lines.Add("老师视线内：移速 ×" + myRole.speedPenaltySeen.ToString("0.##"));
+                        }
+                        else if (myRole.speedBoostUnseen > 0f)
+                        {
+                            lines.Add("老师视野外：移速 ×" + myRole.speedBoostUnseen.ToString("0.##"));
+                        }
+                    }
+                }
                 if (myRole.canBroadcast)
                 {
                     if (ModEntry.musicPlaying) lines.Add("广播播放中…再按 " + ModEntry.MusicKey + " 停止");

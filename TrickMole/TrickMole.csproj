@@ -13,6 +13,11 @@
       <HintPath>$(ManagedDir)\UnityEngine.UIModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- 体育生视线判定：Physics.RaycastNonAlloc / QueryTriggerInteraction -->
+    <Reference Include="UnityEngine.PhysicsModule">
+      <HintPath>$(ManagedDir)\UnityEngine.PhysicsModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 
 </Project>

@@ -7,7 +7,7 @@ namespace TrickMole
 {
     /// <summary>
     /// 角色定义：由 ConfigDirectory/trickmole.json 配置（JsonUtility 序列化）。
-    /// 未配置时内置默认角色"混的入"；服务端配置为权威，客机经 MoleSelectMessage.RoleJson 同步运行时副本。
+    /// 未配置时内置默认角色（混的入/书呆子/体育生）；服务端配置为权威，客机经 MoleSelectMessage.RoleJson 同步运行时副本。
     /// </summary>
     [Serializable]
     internal sealed class RoleDef
@@ -27,6 +27,11 @@ namespace TrickMole
         public float progressPenaltyFraction = 2f / 3f;   // 被挂柱时总体进度扣捣蛋累计的比例
         public float immunityIdleSeconds = 0f;            // >0 且 maxImmunityCharges>0：静心该时长获得一次"免老师攻击"
         public int maxImmunityCharges = 0;                // 免伤次数上限（0 = 无免伤能力）
+        public float speedBoostUnseen = 1f;               // 老师视线外移速倍率（0 = 不生效；旧配置缺字段 JsonUtility 读回 0）
+        public float speedPenaltySeen = 1f;               // 老师视线内移速倍率（0 = 不生效）
+        public float actionSpeedMultiplier = 1f;          // 进食/救人速度倍率：对应时长按此缩短（0 = 不生效）
+        public float sightAngleDegrees = 110f;            // 老师视线锥总角度（0 = 默认 110°）
+        public float sightDistance = 10f;                 // 老师视线最大距离（0 = 默认 10m）
     }
 
     [Serializable]
@@ -43,7 +48,7 @@ namespace TrickMole
         // 内置角色：配置文件里缺哪个就按默认补哪个（count=0 仍可禁用）
         private static List<RoleDef> Defaults()
         {
-            return new List<RoleDef> { Mole(), Nerd() };
+            return new List<RoleDef> { Mole(), Nerd(), Athlete() };
         }
 
         private static RoleDef Mole() => new RoleDef(); // 字段默认值即混的入
@@ -60,6 +65,23 @@ namespace TrickMole
                 canPush = false,
                 immunityIdleSeconds = 20f,
                 maxImmunityCharges = 1,
+            };
+        }
+
+        private static RoleDef Athlete()
+        {
+            return new RoleDef
+            {
+                id = "athlete",
+                name = "体育生",
+                count = 1,
+                trickMultiplier = 1f,
+                canBroadcast = false,
+                canPush = false,
+                progressPenaltyFraction = 0f,
+                speedBoostUnseen = 1.5f,
+                speedPenaltySeen = 0.75f,
+                actionSpeedMultiplier = 1.5f,
             };
         }
 

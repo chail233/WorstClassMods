@@ -228,6 +228,16 @@ namespace TrickMole
                 harmony.Patch(
                     AccessTools.Method(typeof(UnitMessageHandler), "OnStudentGetStunRequest"),
                     prefix: new HarmonyMethod(typeof(ModEntry), "BeforeStudentStunRequest"));
+                // 体育生：视线内外移速 + 进食/救人提速（本地结算，各端算各端的人物）
+                harmony.Patch(
+                    AccessTools.Method(typeof(InputComponent), "GetCurrentMoveSpeed"),
+                    postfix: new HarmonyMethod(typeof(ModEntry), "AfterMoveSpeed"));
+                harmony.Patch(
+                    AccessTools.Method(typeof(StudentItemUseComponent), "OnUpdate"),
+                    prefix: new HarmonyMethod(typeof(ModEntry), "BeforeItemUseTick"));
+                harmony.Patch(
+                    AccessTools.Method(typeof(PunishPillarComponent), "GetRescueDuration"),
+                    postfix: new HarmonyMethod(typeof(ModEntry), "AfterRescueDuration"));
                 // 消息注册挂到游戏自己的注册时机之后（防重注册清掉）
                 harmony.Patch(AccessTools.Method(typeof(RoomManager), "RegisterClientMessageHandlers"), postfix: new HarmonyMethod(typeof(ModEntry), "RegisterClient"));
                 harmony.Patch(AccessTools.Method(typeof(RoomManager), "RegisterServerMessageHandlers"), postfix: new HarmonyMethod(typeof(ModEntry), "RegisterServer"));
@@ -430,6 +440,7 @@ namespace TrickMole
                 pushCooldownUntil.Clear();
                 immunityIdle.Clear();
                 immunityCharges.Clear();
+                athleteSightCache.Clear();
                 musicCooldownRemain = 0f;
                 clientCooldownRemain = 0f;
                 clientPushCooldownRemain = 0f;
@@ -444,6 +455,7 @@ namespace TrickMole
                 pushCooldownUntil.Clear();
                 immunityIdle.Clear();
                 immunityCharges.Clear();
+                athleteSightCache.Clear();
                 musicCooldownRemain = 0f;
                 clientCooldownRemain = 0f;
                 clientPushCooldownRemain = 0f;
@@ -919,6 +931,104 @@ namespace TrickMole
             return !TryConsumeImmunity(request.unitUID);
         }
 
+        // ===== 体育生：视线内外移速 + 进食/救人提速 =====
+
+        private static readonly Dictionary<ulong, (int frame, bool seen)> athleteSightCache = new Dictionary<ulong, (int, bool)>();
+        private static RaycastHit[] sightHits = new RaycastHit[16];
+
+        // 移速唯一出口在本地玩家自己的 InputComponent 上（各端算各端的人物，无需广播）
+        public static void AfterMoveSpeed(InputComponent __instance, ref float __result)
+        {
+            if (__result <= 0f) return;
+            Unit owner = __instance.owner;
+            if (owner == null || !owner.isLocalPlayer || owner.IsDead || !owner.IsStudent) return;
+            if (!assigned.TryGetValue(owner.UID, out RoleDef role)) return;
+            if (role.speedBoostUnseen <= 0f && role.speedPenaltySeen <= 0f) return;
+            if (IsSeenByAnyTeacher(owner, role))
+            {
+                if (role.speedPenaltySeen > 0f) __result *= role.speedPenaltySeen;
+            }
+            else if (role.speedBoostUnseen > 0f)
+            {
+                __result *= role.speedBoostUnseen;
+            }
+        }
+
+        // 进食节奏：仅加速"按住吃东西"的进度累积，墨水/手机等其他按住使用物不受影响
+        public static void BeforeItemUseTick(StudentItemUseComponent __instance, bool ____isHoldingUse, ref float iDt)
+        {
+            if (!____isHoldingUse || iDt <= 0f) return;
+            Unit owner = __instance.owner;
+            if (owner == null || !owner.isLocalPlayer) return;
+            Unit held = __instance.currentHoldUnit;
+            if (held == null || (held.GetComponent<FoodComponent>() == null && held.GetComponent<HotPotIngredientComponent>() == null)) return;
+            if (!assigned.TryGetValue(owner.UID, out RoleDef role) || role.actionSpeedMultiplier <= 0f) return;
+            iDt *= role.actionSpeedMultiplier;
+        }
+
+        // 救人时长：手动救援与无人机救援共用 GetRescueDuration，按倍率缩短即提速
+        public static void AfterRescueDuration(ref float __result)
+        {
+            if (__result <= 0f) return;
+            if (!UnitManager.IsSingletonActive()) return;
+            if (!assigned.TryGetValue(UnitManager.Instance.localPlayerUID, out RoleDef role) || role.actionSpeedMultiplier <= 0f) return;
+            __result /= role.actionSpeedMultiplier;
+        }
+
+        // 供提示盒查询本地玩家当前是否被老师看见（结果缓存到帧）
+        internal static bool IsSeenByAnyTeacher(Unit student, RoleDef role)
+        {
+            int frame = Time.frameCount;
+            if (athleteSightCache.TryGetValue(student.UID, out var cached) && cached.frame == frame) return cached.seen;
+            bool seen = ComputeTeacherSight(student, role);
+            athleteSightCache[student.UID] = (frame, seen);
+            return seen;
+        }
+
+        // 视线口径借鉴 StudentNPCComponent 的师生对视检测：任一存活未眩晕的老师，
+        // 头顶点距离内 + 与老师朝向夹角在锥内 + 头顶连线无墙体遮挡
+        private static bool ComputeTeacherSight(Unit student, RoleDef role)
+        {
+            if (!UnitManager.IsSingletonActive()) return false;
+            Transform studentHead = student.GetPartRoot(EUnitPartType.HeadPosition);
+            Vector3 studentPos = studentHead != null ? studentHead.position : student.Position + Vector3.up;
+            float halfAngle = Mathf.Max(1f, role.sightAngleDegrees > 0f ? role.sightAngleDegrees : 110f) * 0.5f * Mathf.Deg2Rad;
+            float cosHalf = Mathf.Cos(halfAngle);
+            float maxDistance = role.sightDistance > 0f ? role.sightDistance : 10f;
+            foreach (Unit teacher in UnitManager.Instance.unitsDict.Values)
+            {
+                if (teacher == null || teacher == student) continue;
+                if (!teacher.isActived || teacher.IsDead || !teacher.IsTeacher || teacher.IsStun) continue;
+                Transform teacherHead = teacher.GetPartRoot(EUnitPartType.HeadPosition);
+                Vector3 origin = teacherHead != null ? teacherHead.position : teacher.Position + Vector3.up;
+                Vector3 delta = studentPos - origin;
+                float distance = delta.magnitude;
+                if (distance < 0.01f || distance > maxDistance) continue;
+                if (Vector3.Dot(teacher.transform.forward, delta / distance) < cosHalf) continue;
+                if (HasObstacleBetween(origin, delta, distance, teacher.transform, student.transform)) continue;
+                return true;
+            }
+            return false;
+        }
+
+        // 命中师生双方自身碰撞体的不算遮挡（其余任意碰撞体挡住视线即不可见）
+        private static bool HasObstacleBetween(Vector3 origin, Vector3 delta, float distance, Transform teacherRoot, Transform studentRoot)
+        {
+            Vector3 direction = delta.normalized;
+            int count;
+            while ((count = Physics.RaycastNonAlloc(origin, direction, sightHits, distance, -5, QueryTriggerInteraction.Ignore)) == sightHits.Length)
+            {
+                Array.Resize(ref sightHits, sightHits.Length * 2);
+            }
+            for (int i = 0; i < count; i++)
+            {
+                Transform hit = sightHits[i].transform;
+                if (hit == null) continue;
+                if (!hit.IsChildOf(teacherRoot) && !hit.IsChildOf(studentRoot)) return true;
+            }
+            return false;
+        }
+
         // ===== 消息注册与处理 =====
 
         public static void RegisterClient()
@@ -964,11 +1074,14 @@ namespace TrickMole
                 if (!assigned.ContainsKey(uid)) stale.Add(uid);
             foreach (ulong uid in immunityCharges.Keys)
                 if (!assigned.ContainsKey(uid)) stale.Add(uid);
+            foreach (ulong uid in athleteSightCache.Keys)
+                if (!assigned.ContainsKey(uid)) stale.Add(uid);
             foreach (ulong uid in stale)
             {
                 progressByUid.Remove(uid);
                 immunityIdle.Remove(uid);
                 immunityCharges.Remove(uid);
+                athleteSightCache.Remove(uid);
             }
         }
 
