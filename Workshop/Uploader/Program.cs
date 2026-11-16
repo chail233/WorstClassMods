@@ -53,6 +53,7 @@ internal static class Program
         string vdfPath = null;
         string changeNoteOverride = null;
         var dryRun = false;
+        var deleteItem = false;
 
         for (var i = 0; i < args.Length; i++)
         {
@@ -61,7 +62,8 @@ internal static class Program
                 case "--vdf": vdfPath = args[++i]; break;
                 case "--change-note": changeNoteOverride = args[++i]; break;
                 case "--dry-run": dryRun = true; break;
-                default: throw new ModUploaderException("未知参数：" + args[i] + "（支持 --vdf / --change-note / --dry-run）");
+                case "--delete": deleteItem = true; break;
+                default: throw new ModUploaderException("未知参数：" + args[i] + "（支持 --vdf / --change-note / --dry-run / --delete）");
             }
         }
 
@@ -77,6 +79,38 @@ internal static class Program
         if (!Vdf.TryGetValue("appid", out var appidStr) || appidStr.Trim() != AppId.ToString(CultureInfo.InvariantCulture))
             throw new ModUploaderException("vdf 的 appid 必须是 " + AppId + "（Worst Class Ever），实际：" + appidStr);
 
+        var idStr = (Vdf.TryGetValue("publishedfileid", out var id) ? id.Trim() : "");
+        var hasFileId = ulong.TryParse(idStr, NumberStyles.Integer, CultureInfo.InvariantCulture, out var fileId) && fileId != 0;
+
+        if (deleteItem)
+        {
+            if (!hasFileId)
+                throw new ModUploaderException("vdf 里没有 publishedfileid，无法删除物品。");
+            Console.WriteLine("[状态] 模式：永久删除物品 " + fileId.ToString(CultureInfo.InvariantCulture));
+            if (dryRun)
+            {
+                Console.WriteLine("[状态] dry-run 校验通过，未连接 Steam，未删除。");
+                return 0;
+            }
+            Environment.CurrentDirectory = AppContext.BaseDirectory;
+            EnsureAppIdFile();
+            Console.WriteLine("[状态] 连接桌面 Steam 客户端……");
+            if (!SteamAPI.Init())
+                throw new ModUploaderException("SteamAPI 初始化失败。请确认：桌面 Steam 客户端已启动并登录；当前账号拥有 Worst Class Ever。");
+            if (!SteamUser.BLoggedOn())
+                throw new ModUploaderException("Steam 未登录（离线模式），删除物品需要在线账号。");
+            Console.WriteLine("[删除] 调用 DeleteItem（物品将被永久删除，不可恢复）……");
+            var delResult = WaitFor<DeleteItemResult_t>(SteamUGC.DeleteItem(new PublishedFileId_t(fileId)));
+            if (delResult == null)
+                throw new ModUploaderException("DeleteItem 网络 IO 失败，物品状态未知，请先到物品页确认后再决定是否重试。");
+            if (delResult.Value.m_eResult != EResult.k_EResultOK)
+                throw new ModUploaderException("删除物品失败：" + delResult.Value.m_eResult + HintFor(delResult.Value.m_eResult));
+            Console.WriteLine();
+            Console.WriteLine("[完成] 工坊物品已永久删除：PublishedFileId=" + fileId);
+            Console.WriteLine("物品页已失效：https://steamcommunity.com/sharedfiles/filedetails/?id=" + fileId);
+            return 0;
+        }
+
         var content = Path.GetFullPath(RequireKey("content"));
         var modJsonPath = Path.Combine(content, "mod.json");
         if (!File.Exists(modJsonPath))
@@ -90,9 +124,6 @@ internal static class Program
 
         if (preview != null && !File.Exists(preview))
             throw new ModUploaderException("预览图不存在：" + preview + "（jpg/png，≤1MB，建议 800x600）");
-
-        var idStr = (Vdf.TryGetValue("publishedfileid", out var id) ? id.Trim() : "");
-        var hasFileId = ulong.TryParse(idStr, NumberStyles.Integer, CultureInfo.InvariantCulture, out var fileId) && fileId != 0;
 
         Console.WriteLine("[状态] Mod 包：" + modJsonPath);
         Console.WriteLine("[状态] 模式：" + (hasFileId ? "更新物品 " + fileId : "首次发布（将创建新物品）"));

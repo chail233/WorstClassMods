@@ -18,7 +18,6 @@ Workshop/
 │   ├── item.vdf            # 工坊物品元数据（标题/描述/可见性，发布的权威源）
 │   └── preview.png         # 预览图（jpg/png ≤1MB 建议 800x600，当前是占位图，发布前请替换）
 ├── TrickMole/              # 同上
-├── AITeacher/              # 同上
 ├── .content/<Mod>/         # 构建产物暂存（脚本自动 robocopy /MIR 镜像，已 gitignore）
 └── steamcmd/               # SteamCMD 备用环境（当前网络 bootstrap 被劫持不可用，见文末）
 ```
@@ -46,7 +45,7 @@ powershell -ExecutionPolicy Bypass -File Workshop\upload.ps1 TrickMole -Build -C
 ## 注意
 
 - `Music\` 里的音频会随工坊包上传，注意版权（git 不跟踪 mp3，但上传不受影响）
-- 联机类型 Mod（`affectsNetworkMessages: true`）在描述里已注明"所有玩家需安装"；AITeacher 标注"仅房主安装"
+- 联机类型 Mod（`affectsNetworkMessages: true`）在描述里需注明"所有玩家需安装"；纯房主侧 Mod 注明"仅房主安装"
 - 上传进度/结果看脚本控制台输出；失败按提示的 EResult 处理（AccessDenied → 接受法律协议或账号权限）
 - 游戏内 Mod 面板会自动识别订阅的工坊 Mod（工坊包格式与本地部署完全同构）
 

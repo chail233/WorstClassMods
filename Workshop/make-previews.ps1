@@ -130,36 +130,6 @@ $chalkDeco = {
     $g.DrawPolygon($starPen, $pts)
 }
 
-# ---- AITeacher：深青科技风 + 电路走线 + 机器人头 ----
-$aiDeco = {
-    param($g, $w, $h)
-    $circuit = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(150, 72, 220, 255)), 2
-    $dotBrush = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(200, 72, 220, 255))
-    # 电路走线：横段 + 直角转折 + 端点圆（数组字面量里的减法必须加括号：逗号优先级高于减号）
-    $paths = @(
-        @(0, 150, 200, 150, 260, 210),
-        @(0, 480, 150, 480, 210, 420),
-        @(($w - 180), 90, ($w - 60), 90),
-        @(($w - 220), 500, $w, 500)
-    )
-    foreach ($p in $paths) {
-        if ($p.Count -ge 5) { $g.DrawLine($circuit, $p[0], $p[1], $p[2], $p[3]); $g.DrawLine($circuit, $p[2], $p[3], $p[4], $p[5] + 0) }
-        else { $g.DrawLine($circuit, $p[0], $p[1], $p[2], $p[3]) }
-        $g.FillEllipse($dotBrush, $p[$p.Count - 2] - 5, $p[$p.Count - 1] - 5, 10, 10)
-    }
-    # 机器人头（右上：圆角矩形 + 双眼 + 天线）
-    $hx = 580; $hy = 96
-    $head = New-RoundedRect $hx $hy 170 120 24
-    $headBrush = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(60, 0, 0, 0))
-    $headPen = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(220, 72, 220, 255)), 3
-    $g.FillPath($headBrush, $head)
-    $g.DrawPath($headPen, $head)
-    $g.FillEllipse($dotBrush, $hx + 36, $hy + 44, 26, 26)
-    $g.FillEllipse($dotBrush, $hx + 108, $hy + 44, 26, 26)
-    $g.DrawLine($headPen, $hx + 85, $hy, $hx + 85, $hy - 26)
-    $g.FillEllipse($dotBrush, $hx + 79, $hy - 38, 12, 12)
-}
-
 New-Preview -OutPath (Join-Path $root 'PlaygroundMusic\preview.png') `
     -Title '外高音乐扩展' -Subtitle '操场广播曲库扩展 · 自定义 MP3 · 全员曲库协商' `
     -Tag 'Worst Class Ever Mod' -ColorTop '#3A1C71' -ColorBottom '#D76D77' -Decorate $musicDeco
@@ -167,7 +137,3 @@ New-Preview -OutPath (Join-Path $root 'PlaygroundMusic\preview.png') `
 New-Preview -OutPath (Join-Path $root 'TrickMole\preview.png') `
     -Title '课堂角色' -Subtitle '每局随机分配身份 · 角色与数值均可配置扩展' `
     -Tag 'Worst Class Ever Mod' -ColorTop '#2E5339' -ColorBottom '#17281D' -Decorate $chalkDeco
-
-New-Preview -OutPath (Join-Path $root 'AITeacher\preview.png') `
-    -Title 'AI老师' -Subtitle '纯房主侧 · 数量/难度/形态可调 · 单人也能开课' `
-    -Tag 'Worst Class Ever Mod' -ColorTop '#0F2027' -ColorBottom '#2C5364' -Decorate $aiDeco

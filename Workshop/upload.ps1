@@ -4,7 +4,7 @@
 #   powershell -ExecutionPolicy Bypass -File Workshop\upload.ps1 PlaygroundMusic -Build -ChangeNote "v1.0.1 修复xxx"
 #   powershell -ExecutionPolicy Bypass -File Workshop\upload.ps1 TrickMole          # 只同步不上传
 # 参数：
-#   -Mod          必填：Mod 文件夹名（PlaygroundMusic / TrickMole / AITeacher，一个 Mod 一条命令）
+#   -Mod          必填：Mod 文件夹名（PlaygroundMusic / TrickMole，一个 Mod 一条命令）
 #   -Build        上传前先 dotnet build 该 Mod（部署到游戏 Mods 目录后再同步）
 #   -ChangeNote   本次更新说明（写进 vdf 的 changenote；首次发布可省略）
 #   -SkipUpload   只同步 content 并校验，不连接 Steam 不上传
