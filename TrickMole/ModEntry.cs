@@ -1002,7 +1002,10 @@ namespace TrickMole
             float halfAngle = Mathf.Max(1f, role.sightAngleDegrees > 0f ? role.sightAngleDegrees : 110f) * 0.5f * Mathf.Deg2Rad;
             float cosHalf = Mathf.Cos(halfAngle);
             float maxDistance = role.sightDistance > 0f ? role.sightDistance : 10f;
-            foreach (Unit teacher in UnitManager.Instance.unitsDict.Values)
+            // 场景切换 teardown 期间单例可能被 Instance getter 重建但 OnInit 未跑（unitsDict 仍为 null）
+            var units = UnitManager.Instance.unitsDict;
+            if (units == null) return false;
+            foreach (Unit teacher in units.Values)
             {
                 if (teacher == null || teacher == student) continue;
                 if (!teacher.isActived || teacher.IsDead || !teacher.IsTeacher || teacher.IsStun) continue;
