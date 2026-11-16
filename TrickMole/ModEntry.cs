@@ -373,7 +373,7 @@ namespace TrickMole
             return !(musicPlaying && studentUID != localPlayingUID);
         }
 
-        // ===== 角色分配（仅服务端）：按配置名额展开，逐名额独立随机 =====
+        // ===== 角色分配（仅服务端）：名额洗牌后逐名额随机填充 =====
 
         private static void TryAssignRoles()
         {
@@ -388,6 +388,13 @@ namespace TrickMole
 
             List<RoleDef> slots = RoleConfig.ExpandSlots();
             if (slots.Count == 0) return;
+            // 洗牌：学生数少于名额时，被填的是随机一批名额而非配置顺序靠前的名额，
+            // 每个角色等可能出现在本局（满员时洗牌不改变分布，仍是不放回均匀抽样）
+            for (int i = slots.Count - 1; i > 0; i--)
+            {
+                int j = UnityEngine.Random.Range(0, i + 1);
+                (slots[i], slots[j]) = (slots[j], slots[i]);
+            }
             var students = new List<Unit>();
             foreach (var unit in UnitManager.Instance.playerList)
                 if (unit != null && unit.isActived && unit.IsStudent && unit.isPlayer) students.Add(unit);
