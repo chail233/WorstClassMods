@@ -1065,10 +1065,14 @@ namespace TrickMole
             NetworkServer.RegisterHandler<MolePushMessage>(OnServerPush, true);
         }
 
+        // 客机应用签名去重：全量重广播（Version 递增但内容不变）不重复打日志
+        private static string lastSelectSig = "\u0001";
+
         private static void OnMoleSelect(MoleSelectMessage message)
         {
             if (NetworkServer.active) return;
-            if (message.Version < version) return; // 过期消息
+            // Version 只作诊断：Mirror 可靠有序通道内不会收到过期消息，
+            // 跨房间是新连接（version 静态值跨房间不重置，绝不能拿它当过期门槛）
             List<MoleAssignEntry> entries;
             try
             {
@@ -1076,8 +1080,15 @@ namespace TrickMole
                     ? new List<MoleAssignEntry>()
                     : JsonUtility.FromJson<MoleAssignList>(message.AssignmentsJson).entries;
             }
-            catch { return; } // 畸形包不应用，等下一轮全量重广播自愈
+            catch (Exception e)
+            {
+                Log("角色同步包解析失败 v" + message.Version + "：" + e.Message);
+                return; // 畸形包不应用，等下一轮全量重广播自愈
+            }
             version = message.Version;
+            var sig = new System.Text.StringBuilder();
+            foreach (MoleAssignEntry entry in entries) sig.Append(entry.uid).Append(',');
+            string signature = sig.ToString();
             // 全量替换：客机分配表与服务端严格一致，不会残留旧角色
             assigned.Clear();
             foreach (MoleAssignEntry entry in entries)
@@ -1085,6 +1096,11 @@ namespace TrickMole
                 if (entry.uid == 0) continue;
                 RoleDef role = ParseRole(entry.roleJson);
                 if (role != null) assigned[(ulong)entry.uid] = role;
+            }
+            if (signature != lastSelectSig)
+            {
+                lastSelectSig = signature;
+                Log("[状态] 角色同步 v" + message.Version + "：应用 " + assigned.Count + " 条分配" + (assigned.Count == 0 ? "（清场）" : ""));
             }
             // 失去角色的捣蛋累计与免伤状态一并清掉（本地 UI 口径）
             var stale = new HashSet<ulong>();
