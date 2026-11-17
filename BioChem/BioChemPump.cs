@@ -57,15 +57,21 @@ namespace BioChem
 
             bool big = ModEntry.LocalIsBigTeacher;
             bool mini = ModEntry.LocalIsInfected;
+            bool hunter = ModEntry.LocalIsHunter;
             string identity;
             int bars = 0;
-            if (big) { identity = "身份：老师"; bars = 1; }
+            if (hunter) { identity = "身份：老师猎手"; bars = 1; }
+            else if (big) { identity = "身份：老师"; bars = 1; }
             else if (mini) { identity = "身份：小老师"; bars = 2; }
             else if (self.IsStudent) { identity = "身份：学生"; }
             else return; // 观战等非师生状态不画
 
             var lines = new System.Collections.Generic.List<string>();
-            if (mini)
+            if (hunter)
+            {
+                lines.Add("近战挥击：左键点身边老师（伤害 " + ModEntry.Config.hunterDamage + "，间隔 " + ModEntry.Config.hunterAttackInterval.ToString("0.#") + "s）");
+            }
+            else if (mini)
             {
                 if (ModEntry.StunCooldownRemain > 0f)
                     lines.Add("击晕冷却中…" + Mathf.CeilToInt(ModEntry.StunCooldownRemain) + "s");
@@ -80,6 +86,13 @@ namespace BioChem
             }
             else if (state == EClassroomState.Classing)
             {
+                if (ModEntry.HunterUnlocked)
+                    lines.Add("按 G 变身老师猎手！");
+                // 备弹：耗尽时提醒吃东西补弹（服务端拒发，连发循环也会停）
+                if (ModEntry.SelfDartAmmo <= 0)
+                    lines.Add("备弹耗尽！吃东西补充弹药");
+                else
+                    lines.Add("备弹 " + ModEntry.SelfDartAmmo + "/" + ModEntry.Config.dartMaxAmmo + "（吃东西补充）");
                 Unit selfUnit = UnitManager.IsSingletonActive() ? UnitManager.Instance.GetUnitByUID(UnitManager.Instance.localPlayerUID) : null;
                 // 嘴部叼的是吹箭才提示操作；被气球/泡泡糖占用时不误导（按 1/2 会被服务端拒绝）
                 Unit mouthItem = selfUnit != null && selfUnit.isActived
@@ -88,6 +101,14 @@ namespace BioChem
                     lines.Add("连发吹箭筒：右键瞄准、按住左键连发（按 1 收起）");
                 else if (mouthItem == null)
                     lines.Add("按 1 掏出连发吹箭筒");
+            }
+            // 吹箭伤害随小老师人数递增：所有身份上课期间都显示当前有效伤害与感染加成（房主把加伤设 0 时只显示基础伤害）
+            if (state == EClassroomState.Classing)
+            {
+                float bonus = ModEntry.DartDamageBonus();
+                lines.Add(bonus > 0f
+                    ? "吹箭伤害 " + ModEntry.EffectiveDartDamage() + "（基础 " + ModEntry.Config.dartDamage + "，感染加成 +" + (bonus * 100f).ToString("0") + "%）"
+                    : "吹箭伤害 " + ModEntry.Config.dartDamage);
             }
             if (ModEntry.infected.Count > 0)
             {
@@ -108,7 +129,9 @@ namespace BioChem
 
             GUI.Label(new Rect(x, y + topPad, boxWidth, identityHeight), identity, BarTextStyle);
             float cy = y + topPad + identityHeight + gap;
-            if (big)
+            if (hunter)
+                DrawBar(x, cy, width, barHeight, ModEntry.GetHunterHp(self.UID), ModEntry.Config.hunterHp, "HP", new Color(0.85f, 0.2f, 0.2f));
+            else if (big)
                 DrawBar(x, cy, width, barHeight, ModEntry.GetHp(self.UID, true), ModEntry.Config.teacherMaxHp, "HP", new Color(0.85f, 0.2f, 0.2f));
             else if (mini)
             {
@@ -234,6 +257,23 @@ namespace BioChem
                 Kind = reader.ReadByte(),
                 UnitUID = reader.ReadULong(),
                 Position = reader.ReadVector3()
+            };
+        }
+
+        internal static void WriteHunter(NetworkWriter writer, BioChemHunterMessage message)
+        {
+            writer.WriteByte(message.Kind);
+            writer.WriteULong(message.UnitUID);
+            writer.WriteInt(message.Hp);
+        }
+
+        internal static BioChemHunterMessage ReadHunter(NetworkReader reader)
+        {
+            return new BioChemHunterMessage
+            {
+                Kind = reader.ReadByte(),
+                UnitUID = reader.ReadULong(),
+                Hp = reader.ReadInt()
             };
         }
     }

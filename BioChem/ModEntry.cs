@@ -23,11 +23,13 @@ namespace BioChem
     /// 2=Hit（S2C，原生吹箭命中的生化结算：扣血+减速；弹道/音效表现走游戏原生 ApplyHit）
     /// 3=MgFire（C2S，连发吹箭的一发：带弹道参数，服务端注册 taserShots 后广播）
     /// 4=MgShot（S2C，连发吹箭的弹体广播：各端 TaserProjectile.PlayFire 渲染，射手自己跳过——本地已预测渲染）
+    /// 5=AmmoSync（S2C，备弹同步：TargetUID=学生 TargetHp=剩余备弹；射击扣减/掏出/吃东西补弹后广播）
+    /// 6=EatRefill（C2S，吃完一份食物上报补弹；服务端冷却校验）
     /// 弹体 UID 是高位虚拟 UID（VirtualShotUidBase 起），绝不与真实 unit UID 撞。
     /// </summary>
     public struct BioChemDartMessage : NetworkMessage
     {
-        public const byte Toggle = 1, Hit = 2, MgFire = 3, MgShot = 4;
+        public const byte Toggle = 1, Hit = 2, MgFire = 3, MgShot = 4, AmmoSync = 5, EatRefill = 6;
         public byte Kind;
         public ulong TargetUID;    // Hit=目标玩家 / MgFire·MgShot=虚拟弹体 UID
         public int TargetHp;       // Hit 用
@@ -58,13 +60,24 @@ namespace BioChem
         public byte Kind;
     }
 
-    /// <summary>Kind: 1=Down（HP 归零晕倒） 2=Respawn（办公室复活，位置随消息）</summary>
+    /// <summary>Kind: 1=Down（HP 归零晕倒） 2=Respawn（办公室复活，位置随消息） 3=Kill（猎手击杀：永久倒地出局，不复活）</summary>
     public struct BioChemDownMessage : NetworkMessage
     {
-        public const byte Down = 1, Respawn = 2;
+        public const byte Down = 1, Respawn = 2, Kill = 3;
         public byte Kind;
         public ulong UnitUID;
         public Vector3 Position;
+    }
+
+    /// <summary>老师猎手。Kind: 1=TransformRequest（C2S，按 G 请求变身） 2=Transform（S2C，变身广播：变大+特效）
+    /// 3=Strike（C2S，近战挥击：UnitUID=目标） 4=Hit（S2C，扣血结算：UnitUID=目标 Hp=扣血后 HP，双向——
+    /// 老师打猎手 / 猎手打老师共用） 5=RevertVisual（S2C，还原外观：猎手被感染等）</summary>
+    public struct BioChemHunterMessage : NetworkMessage
+    {
+        public const byte TransformRequest = 1, Transform = 2, Strike = 3, Hit = 4, RevertVisual = 5;
+        public byte Kind;
+        public ulong UnitUID;
+        public int Hp;
     }
 
     [Serializable]
@@ -72,6 +85,8 @@ namespace BioChem
     {
         public bool enabled;
         public List<long> infected = new List<long>();
+        public List<long> hunters = new List<long>();
+        public List<long> killed = new List<long>();
         public List<long> hpUids = new List<long>();
         public List<int> hpVals = new List<int>();
         public List<long> stUids = new List<long>();
@@ -95,8 +110,18 @@ namespace BioChem
         // ===== 全局模式状态（服务端权威，快照广播对齐） =====
         internal static bool enabled;
         internal static readonly HashSet<ulong> infected = new HashSet<ulong>();
+        internal static readonly HashSet<ulong> hunters = new HashSet<ulong>();      // 老师猎手（学生阵营，对游戏表现为老师）
+        internal static readonly HashSet<ulong> killedTeachers = new HashSet<ulong>(); // 被猎手击杀出局（永久倒地）的老师
         internal static readonly Dictionary<ulong, int> hp = new Dictionary<ulong, int>();
         internal static readonly Dictionary<ulong, float> stamina = new Dictionary<ulong, float>();
+        // 猎手外观：各端记录变身前模型缩放，感染/回合重置时还原
+        private static readonly Dictionary<ulong, Vector3> hunterOrigScale = new Dictionary<ulong, Vector3>();
+        private static readonly Dictionary<ulong, float> hunterStrikeReadyAt = new Dictionary<ulong, float>(); // 服务端近战冷却
+        private static float localHunterStrikeReadyAt;  // 客户端近战冷却
+        private static bool hunterUnlockAnnounced;      // 解锁变身公告每局只发一次（服务端）
+        internal const float HunterScale = 1.3f;        // 猎手模型放大倍数（视觉+受击盒一起变大）
+        internal const float HunterAttackRange = 2.2f;  // 猎手近战范围
+        internal const int HunterTakenDamage = 2;       // 老师剑击/小老师击晕命中猎手的扣血
         internal static uint version;
         private static float nextRepublish;
 
@@ -109,15 +134,20 @@ namespace BioChem
         // 吹箭减速层数（服务端计数，广播层数给目标端做本地衰减）
         private static readonly Dictionary<ulong, List<float>> serverSlowExpiries = new Dictionary<ulong, List<float>>();
 
-        // ===== 吹箭筒：原生 Taser 物品，按 1 掏出/收起（服务端结算），无限弹药 =====
+        // ===== 吹箭筒：原生 Taser 物品，按 1 掏出/收起（服务端结算），备弹制 =====
         // 一发一物原生消耗（打光那把原生管线自动回收）；收起即回收，再按 1 随时补掏
         private static int taserItemId = -1;
         private static readonly Dictionary<ulong, ulong> issuedTaser = new Dictionary<ulong, ulong>(); // 学生 UID → 已掏出的 Taser 物品 UID
         // 挂载重试：物品模型异步加载完成后嘴部挂点才存在，逐帧重试 TryEquipMouthItem
-        private static readonly Dictionary<ulong, (ulong student, float deadline)> pendingEquip = new Dictionary<ulong, (ulong, float)>(); // 物品 UID → 学生 UID
+        private static readonly Dictionary<ulong, (ulong student, float deadline)> pendingEquip = new Dictionary<ulong, (ulong student, float deadline)>(); // 物品 UID → 学生 UID
+        // 备弹：服务端权威计数（GetDartAmmo 懒初始化为满），射击扣减/吃完食物补充，AmmoSync 广播对齐射手端
+        private static readonly Dictionary<ulong, int> dartAmmo = new Dictionary<ulong, int>();
+        private static readonly Dictionary<ulong, float> foodRefillReadyAt = new Dictionary<ulong, float>(); // 补弹防伪冷却（吃完一份食物至少要吃几秒）
+        private const float FoodRefillCooldown = 2.5f;
 
         // ===== 客机本地 =====
         private static readonly List<float> selfSlowExpiries = new List<float>(); // 本地玩家被吹箭命中的减速层（各自 0.5s 过期）
+        private static int selfDartAmmo; // 本地玩家备弹（服务端 AmmoSync 权威校准；ClearRoundState 重置为满）
         private static float localStunReadyAt;   // 击晕本地冷却
         private static bool registeredHooks;
         // 本地玩家自己的体力模拟（走路消耗 + 写板书回复），服务端只在击晕结算时按申报值扣减
@@ -127,6 +157,12 @@ namespace BioChem
 
         private static readonly MethodInfo ReleaseStudentOnServerMethod =
             AccessTools.Method(typeof(SkillMessageHandler), "ReleaseStudentOnServer");
+        // 原生规范传送（internal）：NetData.Position + SyncTransform 立即生效 + 刚体落位 + 输入复位，
+        // 裸 Unit.SetPosition 只动 transform 不动刚体，复活/传送类场景必须走这个
+        private static readonly MethodInfo ApplyPlayerRelocationMethod =
+            AccessTools.Method(typeof(Unit), "ApplyPlayerRelocation");
+        private static readonly MethodInfo TeacherClearStunMethod =
+            AccessTools.Method(typeof(TeacherStunComponent), "ClearStun");
 
         // ===== 连发吹箭筒（按 2）：同一原生 Taser 物品，mod 接管开火 =====
         // 原生吹箭一发一物（TryConsumeShot 消耗+回收），连发靠抑制原生单击开火 + 定时造弹：
@@ -161,9 +197,33 @@ namespace BioChem
                     postfix: new HarmonyMethod(typeof(ModEntry), "AfterIsTeacher"));
                 harmony.Patch(AccessTools.PropertyGetter(typeof(Unit), "IsStudent"),
                     postfix: new HarmonyMethod(typeof(ModEntry), "AfterIsStudent"));
-                // 感染者禁止捣蛋计分（禁用学生功能的兜底）
+                // 生化模式捣蛋计分整体封锁（捣蛋进度/学生捣蛋胜利/机制奖励全部冻结）
                 harmony.Patch(AccessTools.Method(typeof(ClassroomManager), "OnResponseTrickCountData"),
                     prefix: new HarmonyMethod(typeof(ModEntry), "BeforeTrickCount"));
+                // 倒计时结束原版判老师胜（TeacherTimeout）→ 生化模式翻转为学生幸存获胜
+                harmony.Patch(AccessTools.Method(typeof(ClassroomManager), "FinishClass"),
+                    prefix: new HarmonyMethod(typeof(ModEntry), "BeforeFinishClass"));
+                // 吃东西补弹：普通食物吃完最后一口（判定与原生一致：入口耐久 ∈ (0,1]）→ 客户端上报服务端补弹。
+                // 香蕉/马桶食物等子类都走 base.OnItemUseSuccess，补丁基类即可全覆盖；peel/leftovers 不调 base=不吃，天然不触发
+                harmony.Patch(AccessTools.Method(typeof(FoodComponent), "OnItemUseSuccess"),
+                    prefix: new HarmonyMethod(typeof(ModEntry), "BeforeFoodFinishingBite"));
+                // 火锅食材被吃光：Apply 广播状态翻转 Consumed 且请求者是自己 → 上报补弹（prefix 抓翻转前状态防旧包误判）
+                harmony.Patch(AccessTools.Method(typeof(HotPotIngredientComponent), "Apply"),
+                    prefix: new HarmonyMethod(typeof(ModEntry), "BeforeHotPotApply"),
+                    postfix: new HarmonyMethod(typeof(ModEntry), "AfterHotPotApply"));
+                // 老师剑击打猎手：原生弹体命中过滤只认 IsStudent（猎手已翻转成 IsTeacher 天然免疫）——
+                // postfix 放行猎手进命中名单，服务端 ChalkHit 结算 prefix 把"晕学生"改写成"扣猎手 HP"
+                harmony.Patch(AccessTools.Method(typeof(TeacherSlashProjectile), "Student"),
+                    postfix: new HarmonyMethod(typeof(ModEntry), "AfterSlashStudentFilter"));
+                harmony.Patch(AccessTools.Method(typeof(UnitMessageHandler), "OnChalkHitRequest"),
+                    prefix: new HarmonyMethod(typeof(ModEntry), "BeforeChalkHit"));
+                // 猎手固定只能用近战：吞掉手持物品（书/零食/墨水/手机/火锅等）与嘴部物品（吹箭/泡泡糖/气球）的全部输入
+                harmony.Patch(AccessTools.Method(typeof(StudentItemUseComponent), "GetCmdInput"),
+                    prefix: new HarmonyMethod(typeof(ModEntry), "BeforeHunterStudentItemInput"));
+                harmony.Patch(AccessTools.Method(typeof(MouthItemUseComponent), "GetCmdInput"),
+                    prefix: new HarmonyMethod(typeof(ModEntry), "BeforeHunterMouthItemInput"));
+                Writer<BioChemHunterMessage>.write = BioChemPump.WriteHunter;
+                Reader<BioChemHunterMessage>.read = BioChemPump.ReadHunter;
                 // 挂柱计时：绑定开始记录，释放清除；超时由服务端 Tick 强制释放并感染
                 harmony.Patch(AccessTools.Method(typeof(PunishPillarComponent), "OnResponseBindStudent"),
                     postfix: new HarmonyMethod(typeof(ModEntry), "AfterBindToPillar"));
@@ -227,20 +287,39 @@ namespace BioChem
         public static void AfterIsTeacher(Unit __instance, ref bool __result)
         {
             if (__result || !enabled || __instance == null) return;
-            if (infected.Contains(__instance.UID)) __result = true;
+            if (infected.Contains(__instance.UID) || hunters.Contains(__instance.UID)) __result = true;
         }
 
         public static void AfterIsStudent(Unit __instance, ref bool __result)
         {
             if (!__result || !enabled || __instance == null) return;
-            if (infected.Contains(__instance.UID)) __result = false;
+            if (infected.Contains(__instance.UID) || hunters.Contains(__instance.UID)) __result = false;
         }
 
         // ===== 捣蛋计分封锁 =====
 
+        // 生化模式下捣蛋值整体不生效：OnResponseTrickCountData 是游戏全部捣蛋计分的唯一服务端入口，
+        // 整体跳过后捣蛋进度冻结在 0——学生捣蛋胜利(StudentTrick)、按捣蛋值触发的机制奖励、捣蛋 UI 全部不走，
+        // 感染者封锁也由此一并覆盖（并存 TrickMole 的捣蛋值累计/挂柱扣分在生化模式下同样无效）
         public static bool BeforeTrickCount(ulong uid)
         {
-            return !(enabled && infected.Contains(uid));
+            return !enabled;
+        }
+
+        // CF 终结者规则：只要学生阵营还有幸存者（未抓学生或存活猎手），老师就赢不了——
+        // 原版"抓完全部学生"TeacherCatch 被拦下（猎手活着=没抓完），倒计时到点也翻转为学生胜；
+        // 学生阵营真全灭（全感染且猎手死绝）时 TeacherCatch 放行=老师胜。outcome 置 null 不冒用 StudentTrick 上报 Steam
+        public static bool BeforeFinishClass(ref bool teacherWin, ref SteamMatchOutcome? outcome)
+        {
+            if (!enabled || !teacherWin) return true;
+            bool studentTeamAlive = RemainingStudents() > 0 || hunters.Count > 0;
+            if (outcome == SteamMatchOutcome.TeacherCatch) return !studentTeamAlive; // 有幸存者拦下结算，真全灭放行
+            if (outcome == SteamMatchOutcome.TeacherTimeout && studentTeamAlive)
+            {
+                teacherWin = false; // 幸存到倒计时结束：学生获胜
+                outcome = null;
+            }
+            return true;
         }
 
         // ===== 挂柱计时 → 感染 =====
@@ -316,6 +395,10 @@ namespace BioChem
             NotifyAll(announce);            // 房主本机弹
             BroadcastState(announce);       // 客机随快照弹（消息上带 Notify 才能到客机）
             Log("[状态] " + name + " 被感染为小老师（HP " + Config.miniMaxHp + "）");
+            // 学生阵营可能就此清空（最后一名普通学生转阵营）：重触发原版"全员被抓"检查，
+            // 被抓+感染清空时 FinishClass(TeacherCatch) 会被我们的 FinishClass prefix 按幸存者规则放行
+            if (NetRuntime.IsServer && MonoSingletonT<ClassroomManager>.IsSingletonActive())
+                checkAllPunishedMethod?.Invoke(MonoSingletonT<ClassroomManager>.Instance, null);
         }
 
         // ===== 写板书：大老师回 HP =====
@@ -330,7 +413,7 @@ namespace BioChem
             Unit self = UnitManager.Instance.localPlayer;
             if (self == null || !self.isActived || self.IsDead || !self.IsTeacher) return;
             ulong selfUid = self.UID;
-            if (infected.Contains(selfUid)) return;
+            if (infected.Contains(selfUid) || hunters.Contains(selfUid)) return; // 猎手不走大老师板书回血
             if (NetRuntime.IsServer) ApplyWrite(BioChemWriteMessage.TeacherHp, selfUid);
             else if (RoomManager.IsSingletonActive()) RoomManager.Instance.SendToServer(new BioChemWriteMessage { Kind = BioChemWriteMessage.TeacherHp });
         }
@@ -351,7 +434,7 @@ namespace BioChem
         private static void ApplyWrite(byte kind, ulong uid)
         {
             Unit unit = UnitManager.IsSingletonActive() ? UnitManager.Instance.GetUnitByUID(uid) : null;
-            if (unit == null || !unit.isPlayer || !unit.IsTeacher || infected.Contains(uid)) return;
+            if (unit == null || !unit.isPlayer || !unit.IsTeacher || infected.Contains(uid) || hunters.Contains(uid)) return;
             // 大老师按大老师上限取当前值：无记录时 GetHp(uid, false) 会错误初始化成小老师 HP
             hp[uid] = Mathf.Min(Config.teacherMaxHp, GetHp(uid, isBigTeacher: true) + Config.teacherHpPerWrite);
             BroadcastState();
@@ -359,20 +442,65 @@ namespace BioChem
 
         // ===== 吹箭筒：原生 Taser 物品，按 1 掏出/收起（服务端结算） =====
 
-        // C2S：按 1/按 2 掏出收起 + 连发吹箭的一发
+        // C2S：按 1 掏出收起 + 连发吹箭的一发 + 吃完食物补弹上报
         private static void OnServerDart(NetworkConnectionToClient connection, BioChemDartMessage message)
         {
             if (!NetRuntime.IsServer) return;
             if (message.Kind == BioChemDartMessage.Toggle) ToggleDart(ResolveSender(connection));
             else if (message.Kind == BioChemDartMessage.MgFire) OnServerMgFire(connection, message);
+            else if (message.Kind == BioChemDartMessage.EatRefill) OnServerEatRefill(connection);
+        }
+
+        // ===== 备弹 =====
+
+        // 服务端权威备弹：未记录过视为满（懒初始化）
+        private static int GetDartAmmo(ulong uid)
+        {
+            if (!dartAmmo.TryGetValue(uid, out int value)) return dartAmmo[uid] = Config.dartMaxAmmo;
+            return value;
+        }
+
+        private static void BroadcastAmmo(ulong uid)
+        {
+            var sync = new BioChemDartMessage { Kind = BioChemDartMessage.AmmoSync, TargetUID = uid, TargetHp = GetDartAmmo(uid) };
+            Broadcast(sync);
+            ApplyAmmoSyncLocal(sync);
+        }
+
+        // 各端应用备弹同步；本人备弹增加（吃东西）时本地弹提示
+        private static void ApplyAmmoSyncLocal(BioChemDartMessage message)
+        {
+            if (!UnitManager.IsSingletonActive() || message.TargetUID != UnitManager.Instance.localPlayerUID) return;
+            int before = selfDartAmmo;
+            selfDartAmmo = Mathf.Max(0, message.TargetHp);
+            if (before >= 0 && selfDartAmmo > before)
+                NotifySelf("食物补充了吹箭弹药：" + selfDartAmmo + "/" + Config.dartMaxAmmo);
+        }
+
+        // 吃完一份食物 → 服务端补弹（冷却防伪：吃完一份食物至少要吃几秒，刷不了）
+        private static void OnServerEatRefill(NetworkConnectionToClient connection)
+        {
+            if (!NetRuntime.IsServer || !enabled || !ServerClassActive() || Config.dartAmmoPerFood <= 0) return;
+            ulong sender = ResolveSender(connection);
+            if (sender == 0 || infected.Contains(sender)) return; // 感染者没有吹箭筒
+            if (Time.unscaledTime < (foodRefillReadyAt.TryGetValue(sender, out float readyAt) ? readyAt : 0f)) return;
+            if (!UnitManager.IsSingletonActive()) return;
+            Unit student = UnitManager.Instance.GetUnitByUID(sender);
+            if (student == null || !student.isActived || student.IsDead || !student.IsStudent) return;
+            foodRefillReadyAt[sender] = Time.unscaledTime + FoodRefillCooldown;
+            if (GetDartAmmo(sender) >= Config.dartMaxAmmo) return; // 满弹：静默吃掉
+            dartAmmo[sender] = Mathf.Min(Config.dartMaxAmmo, GetDartAmmo(sender) + Config.dartAmmoPerFood);
+            BroadcastAmmo(sender);
+            Log("[状态] " + GetName(sender) + " 吃东西补充吹箭弹药至 " + dartAmmo[sender] + "/" + Config.dartMaxAmmo);
         }
 
         private static void ToggleDart(ulong uid)
         {
             if (!enabled || !UnitManager.IsSingletonActive()) return;
-            if (infected.Contains(uid)) return; // 感染者没有吹箭筒
+            if (infected.Contains(uid) || hunters.Contains(uid)) return; // 感染者/猎手没有吹箭筒（猎手固定近战）
             Unit student = UnitManager.Instance.GetUnitByUID(uid);
             if (student == null || !student.isActived || student.IsDead || !student.IsStudent) return;
+            BroadcastAmmo(uid); // 掏出/收起都同步一次备弹（未记录过则懒初始化为满）
 
             if (issuedTaser.TryGetValue(uid, out ulong itemUid))
             {
@@ -491,6 +619,7 @@ namespace BioChem
             if (!localMgMode || !enabled) return;
             if (!Input.GetMouseButton(0)) return; // 按住左键
             if (Time.unscaledTime < mgNextFireAt) return;
+            if (selfDartAmmo <= 0) return; // 备弹耗尽（服务端 AmmoSync 权威校准，本地先扣保证手感）
             if (!CanClassAct()) return;
             if (!UnitManager.IsSingletonActive()) return;
             Unit self = UnitManager.Instance.GetUnitByUID(UnitManager.Instance.localPlayerUID);
@@ -508,6 +637,7 @@ namespace BioChem
             var shot = (TaserFired_S2C)args[2];
 
             mgNextFireAt = Time.unscaledTime + Config.fireInterval;
+            if (selfDartAmmo > 0) selfDartAmmo--; // 本地乐观扣减，服务端 AmmoSync 随后校准
             // 虚拟弹体 UID：bit62-61 高位标记 + bit60-32 玩家 UID（截 29 位）+ bit31-0 序号，
             // 绝不与真实 unit UID 撞；间隔小于弹体飞行时间时弹体重叠，唯一 UID 保证注册/命中/销毁互不干扰
             ulong shotUid = VirtualShotUidBase
@@ -568,6 +698,7 @@ namespace BioChem
                 if (sender == 0 || infected.Contains(sender)) return; // 感染者没有吹箭筒
                 if (Time.unscaledTime < (mgFireUntil.TryGetValue(sender, out float until) ? until : 0f)) return;
                 if (message.TargetUID < VirtualShotUidBase) return; // 虚拟 UID 必须带高位标记
+                if (GetDartAmmo(sender) <= 0) return; // 备弹耗尽：服务端拒发（客户端 UI 已提示吃东西补弹）
                 if (float.IsNaN(message.Origin.x) || float.IsInfinity(message.Origin.x)
                     || float.IsNaN(message.Direction.x) || float.IsInfinity(message.Direction.x)) return;
                 float dirMag = message.Direction.sqrMagnitude;
@@ -579,6 +710,7 @@ namespace BioChem
                 if (mouthItem == null || !mouthItem.isActived || mouthItem.UnitSubType != EUnitSubType.Taser) return;
 
                 mgFireUntil[sender] = Time.unscaledTime + Config.fireInterval;
+                dartAmmo[sender] = GetDartAmmo(sender) - 1;
                 RecordTaserShot(message.TargetUID, sender, message.StunDuration, message.Range, message.Speed);
                 PlayFireShot(BuildShot(message)); // 服务器本机渲染（host 视角）；host 射手时 PlayFire 去重跳过
                 Broadcast(new BioChemDartMessage
@@ -593,6 +725,7 @@ namespace BioChem
                     Radius = message.Radius,
                     StunDuration = message.StunDuration
                 });
+                BroadcastAmmo(sender); // 每发校准射手端备弹，防网络抖动下与本地乐观扣减漂移
             }
             catch (Exception e)
             {
@@ -616,6 +749,21 @@ namespace BioChem
         }
 
         // ===== 原生吹箭命中：生化结算 =====
+
+        internal const float DartDamageBonusCap = 3f; // 感染加成系数硬上限（×4 伤害封顶）
+
+        // 吹箭伤害加成系数：每个已感染学生（小老师）+dartDamageBonusPerInfected，封顶 DartDamageBonusCap
+        internal static float DartDamageBonus()
+        {
+            if (Config.dartDamageBonusPerInfected <= 0f) return 0f;
+            return Mathf.Min(infected.Count * Config.dartDamageBonusPerInfected, DartDamageBonusCap);
+        }
+
+        // 当前有效吹箭伤害（服务端结算与各端 UI 显示共用同一公式；客机 infected 随快照/感染广播即时对齐）
+        internal static int EffectiveDartDamage()
+        {
+            return Mathf.Max(1, Mathf.RoundToInt(Config.dartDamage * (1f + DartDamageBonus())));
+        }
 
         // TaserProjectile.TryStun 是服务端/客机共用的眩晕入口；只在我们吹箭的原生结算窗口里拦
         public static bool BeforeTaserTryStun(ref bool __result)
@@ -659,17 +807,19 @@ namespace BioChem
                 if (!enabled || !NetRuntime.IsServer || !impact.collided) return;
                 if (!lastImpactWasRegistered) return; // 未注册的弹（原生已拒绝）不结算
                 if (!UnitManager.IsSingletonActive()) return;
-                Unit target = UnitManager.Instance.GetUnitByUID(impact.targetUID);
-                if (target == null || !target.isActived || target.IsDead) return;
-                if (!target.isPlayer || !target.IsTeacher) return;
-                if (downedUntil.ContainsKey(target.UID)) return;
-                if (!ServerClassActive()) return;
+            Unit target = UnitManager.Instance.GetUnitByUID(impact.targetUID);
+            if (target == null || !target.isActived || target.IsDead) return;
+            if (!target.isPlayer || !target.IsTeacher) return;
+            if (downedUntil.ContainsKey(target.UID)) return;
+            if (hunters.Contains(target.UID) || killedTeachers.Contains(target.UID)) return; // 吹箭打不到猎手，出局的老师也不再结算
+            if (!ServerClassActive()) return;
 
                 var expiries = PruneServerSlow(target.UID);
                 if (expiries.Count < Config.dartSlowMaxStacks) // 层数封顶，与服务端移速口径一致
                     expiries.Add(Time.unscaledTime + Config.dartSlowSeconds);
                 byte stacks = (byte)Mathf.Min(Config.dartSlowMaxStacks, expiries.Count);
-                int newHp = GetHp(target.UID, !infected.Contains(target.UID)) - Config.dartDamage;
+                int damage = EffectiveDartDamage();
+                int newHp = GetHp(target.UID, !infected.Contains(target.UID)) - damage;
                 hp[target.UID] = Mathf.Max(0, newHp);
                 var hit = new BioChemDartMessage
                 {
@@ -679,7 +829,7 @@ namespace BioChem
                 };
                 Broadcast(hit);
                 ApplyDartHit(hit);
-                Log("[状态] 吹箭命中 " + GetName(target.UID) + "，HP " + hp[target.UID] + "，减速 " + stacks + "/" + Config.dartSlowMaxStacks);
+                Log("[状态] 吹箭命中 " + GetName(target.UID) + "（伤害 " + damage + "，感染加成 +" + (DartDamageBonus() * 100f).ToString("0") + "%），HP " + hp[target.UID] + "，减速 " + stacks + "/" + Config.dartSlowMaxStacks);
                 if (hp[target.UID] <= 0) DownUnit(target.UID);
             }
             catch (Exception e)
@@ -688,17 +838,56 @@ namespace BioChem
             }
         }
 
-        // 各端数据同步：被命中者本地叠加减速层（弹道/音效/特效由原生 ApplyHit 播放）
+        // 各端数据同步：被命中者把减速层数校准到服务端权威值（消息里带 SlowStacks，服务端封顶+过期裁剪；
+        // 旧版本地盲加一层，层数在丢包/抖动下与主机漂移，表现成"减速只在主机生效"）。
+        // 弹道/音效/特效由原生 ApplyHit 播放
         private static void ApplyDartHit(BioChemDartMessage message)
         {
             if (message.TargetHp >= 0) hp[message.TargetUID] = message.TargetHp;
             if (UnitManager.IsSingletonActive() && message.TargetUID == UnitManager.Instance.localPlayerUID)
             {
                 PruneSelfSlow();
-                if (selfSlowExpiries.Count < Config.dartSlowMaxStacks)
+                while (selfSlowExpiries.Count < message.SlowStacks)
                     selfSlowExpiries.Add(Time.unscaledTime + Config.dartSlowSeconds);
+                while (selfSlowExpiries.Count > message.SlowStacks)
+                    selfSlowExpiries.RemoveAt(0);
                 NotifySelf("你被吹箭命中！剩余 HP " + message.TargetHp);
+                Log("[状态] 本端命中同步：HP " + message.TargetHp + "，减速 " + selfSlowExpiries.Count + " 层");
             }
+        }
+
+        // ===== 吃东西补弹检测 =====
+
+        // 普通食物吃完最后一口（判定与原生 FoodComponent.OnItemUseSuccess 一致：入口耐久 ∈ (0,1]）→ 上报补弹。
+        // 香蕉/马桶食物子类的吃法都调 base，补丁基类全覆盖；peel/leftovers 分支不调 base（不是吃），天然不触发
+        public static void BeforeFoodFinishingBite(FoodComponent __instance, Unit user)
+        {
+            if (!enabled || user == null || !user.isLocalPlayer) return;
+            ItemData data = __instance.owner != null ? __instance.owner.GetData<ItemData>() : null;
+            if (data == null || data.CurrentDurability <= 0f || data.CurrentDurability > 1f) return;
+            SendEatRefill();
+        }
+
+        // 火锅食材被吃光：服务端 Eat 操作把 RemainingDurability 扣到 0 → Consumed 翻转广播回各端，
+        // 请求者本人端上报补弹（prefix 抓翻转前状态；postfix 用 __instance.State 判翻转——Apply 对旧包有 version 门槛，直接读响应会被乱序旧包误判）
+        private static bool hotPotApplyPrevConsumed;
+
+        public static void BeforeHotPotApply(HotPotIngredientComponent __instance, HotPotState_S2C response)
+        {
+            hotPotApplyPrevConsumed = __instance.State.Consumed;
+        }
+
+        public static void AfterHotPotApply(HotPotIngredientComponent __instance, HotPotState_S2C response)
+        {
+            if (!enabled || hotPotApplyPrevConsumed || !__instance.State.Consumed) return;
+            if (!UnitManager.IsSingletonActive() || response.RequestUserUID != UnitManager.Instance.localPlayerUID) return;
+            SendEatRefill();
+        }
+
+        private static void SendEatRefill()
+        {
+            if (NetRuntime.IsServer) OnServerEatRefill(null);
+            else if (RoomManager.IsSingletonActive()) RoomManager.Instance.SendToServer(new BioChemDartMessage { Kind = BioChemDartMessage.EatRefill });
         }
 
         // 减速：教师团队本地玩家移速乘 (1 - 层数×0.2)
@@ -740,7 +929,9 @@ namespace BioChem
             float bestDist = Config.miniStunRange;
             foreach (Unit unit in UnitManager.Instance.playerList)
             {
-                if (unit == null || !unit.isActived || unit.IsDead || !unit.IsStudent || unit.IsStun) continue;
+                if (unit == null || !unit.isActived || unit.IsDead || unit.IsStun) continue;
+                bool targetable = unit.IsStudent || hunters.Contains(unit.UID); // 猎手对游戏已是老师身份，单独放行
+                if (!targetable) continue;
                 float dist = Vector3.Distance(self.Position, unit.Position);
                 if (dist < bestDist) { bestDist = dist; best = unit; }
             }
@@ -761,7 +952,9 @@ namespace BioChem
             Unit sender = UnitManager.Instance.GetUnitByUID(senderUID);
             Unit target = UnitManager.Instance.GetUnitByUID(message.TargetUID);
             if (sender == null || !sender.isActived || sender.IsDead || sender.IsStun) return;
-            if (target == null || !target.isActived || target.IsDead || !target.IsStudent || target.IsStun) return;
+            bool targetIsHunter = hunters.Contains(message.TargetUID);
+            if (target == null || !target.isActived || target.IsDead || target.IsStun) return;
+            if (!target.IsStudent && !targetIsHunter) return; // 学生或猎手（猎手对游戏已是老师身份，单独放行）
             if (Vector3.Distance(sender.Position, target.Position) > Config.miniStunRange + 0.5f) return;
 
             stamina[senderUID] = Mathf.Max(0f, claimed - Config.staminaCostPerStun);
@@ -769,8 +962,9 @@ namespace BioChem
             var apply = new BioChemStunMessage { Kind = BioChemStunMessage.Apply, TargetUID = target.UID, Duration = Config.miniStunSeconds };
             Broadcast(apply);
             ApplyStunLocal(apply.TargetUID, apply.Duration);
+            if (targetIsHunter) DamageHunter(target.UID, HunterTakenDamage, senderUID); // 晕猎手=晕住+扣血
             BroadcastState();
-            Log("[状态] 小老师 " + GetName(senderUID) + " 击晕了 " + GetName(target.UID));
+            Log("[状态] 小老师 " + GetName(senderUID) + (targetIsHunter ? " 击晕了猎手 " : " 击晕了 ") + GetName(target.UID));
         }
 
         // 各端应用：学生眩晕指定时长（带精确时长的投射物眩晕通道，与电击枪表现一致）
@@ -816,11 +1010,16 @@ namespace BioChem
         {
             if (!UnitManager.IsSingletonActive()) return;
             Unit unit = UnitManager.Instance.GetUnitByUID(message.UnitUID);
-            if (unit == null || !unit.isActived) return;
+            if (unit == null || !unit.isActived)
+            {
+                Log("[状态] 倒地表现未应用：" + GetName(message.UnitUID) + "（单位不存在或未激活）");
+                return;
+            }
             var teacherStun = unit.GetComponent<TeacherStunComponent>();
             if (teacherStun != null) teacherStun.TryGetProjectileStun(Config.downSeconds);
             else unit.GetComponent<StudentStunComponent>()?.TryGetProjectileStun(Config.downSeconds);
             NotifyAll(GetName(message.UnitUID) + " 倒下了！将在办公室复活");
+            Log("[状态] 倒地表现已应用：" + GetName(message.UnitUID) + "（眩晕 " + Config.downSeconds.ToString("0.#") + "s）");
         }
 
         private static void TickDowned()
@@ -847,14 +1046,30 @@ namespace BioChem
             BroadcastState();
         }
 
-        // 复活：本人端把单位传送到办公室并清空本地减速/冷却；晕倒眩晕此时刚好自然到期
+        // 复活：显式清掉倒地眩晕 + 原生规范传送 + HP 全端立即恢复。
+        // 眩晕不能指望"刚好自然到期"：Down 消息被收到时才起表，比服务端的 downedUntil 晚一个网络延迟，
+        // 复活瞬间被传送者往往还带着零点几秒的残晕（躺着被传走）；残晕又压着移速，看起来就是"复活后状态没刷新"。
+        // HP 不能只等 5 秒快照：TickDowned 只重置服务端字典，客机要等下一份快照 HP 条才满上。
         private static void ApplyRespawnLocal(BioChemDownMessage message)
         {
             if (!UnitManager.IsSingletonActive()) return;
             Unit unit = UnitManager.Instance.GetUnitByUID(message.UnitUID);
-            if (unit == null || !unit.isActived) return;
-            unit.GetComponent<ForceComponent>()?.SetVelocity(Vector3.zero, includeY: false);
-            unit.SetPosition(message.Position);
+            if (unit == null || !unit.isActived)
+            {
+                Log("[状态] 复活未应用：" + GetName(message.UnitUID) + "（单位不存在或未激活）");
+                return;
+            }
+            var teacherStun = unit.GetComponent<TeacherStunComponent>();
+            if (teacherStun != null)
+            {
+                try { TeacherClearStunMethod?.Invoke(teacherStun, new object[] { false }); }
+                catch (Exception e) { Log("清除老师眩晕失败：" + e.Message); }
+            }
+            else unit.GetComponent<StudentStunComponent>()?.InterruptStun();
+            try { ApplyPlayerRelocationMethod?.Invoke(unit, new object[] { message.Position }); }
+            catch (Exception e) { Log("复活传送失败：" + e.Message); }
+            // 与 TickDowned 同款公式：HP 立即恢复，不等快照
+            hp[message.UnitUID] = infected.Contains(message.UnitUID) ? Config.miniMaxHp : Config.teacherMaxHp;
             if (message.UnitUID == UnitManager.Instance.localPlayerUID)
             {
                 selfSlowExpiries.Clear();
@@ -863,6 +1078,285 @@ namespace BioChem
                 lastSelfPosValid = false; // 传送后重置位移基准，避免误判移动
                 NotifySelf("已在办公室复活，状态刷新");
             }
+            Log("[状态] 已应用复活：" + GetName(message.UnitUID) + "（清眩晕+传送+HP " + hp[message.UnitUID] + "）");
+        }
+
+        // ===== 老师猎手 =====
+
+        internal static bool LocalIsHunter
+        {
+            get
+            {
+                if (!UnitManager.IsSingletonActive() || !enabled) return false;
+                return hunters.Contains(UnitManager.Instance.localPlayerUID);
+            }
+        }
+
+        // 变身已解锁（剩余学生 ≤ 阈值）：信息盒提示用
+        internal static bool HunterUnlocked => enabled && UnitManager.IsSingletonActive() && RemainingStudents() <= Config.hunterTriggerStudents;
+
+        internal static int GetHunterHp(ulong uid)
+        {
+            return hp.TryGetValue(uid, out int value) ? value : Config.hunterHp;
+        }
+
+        // 剩余可变身学生数：存活、未被抓（103=罚站）、未感染、未变身的真人学生
+        internal static int RemainingStudents()
+        {
+            if (!UnitManager.IsSingletonActive()) return 0;
+            int count = 0;
+            foreach (Unit unit in UnitManager.Instance.playerList)
+            {
+                if (unit == null || !unit.isPlayer || !unit.isActived || unit.IsDead) continue;
+                if (unit.UnitSubType != EUnitSubType.Student) continue;
+                if (infected.Contains(unit.UID) || hunters.Contains(unit.UID)) continue;
+                if (unit.CurState() == 103) continue;
+                count++;
+            }
+            return count;
+        }
+
+        private static void OnServerHunter(NetworkConnectionToClient connection, BioChemHunterMessage message)
+        {
+            if (!NetRuntime.IsServer) return;
+            ulong sender = ResolveSender(connection);
+            if (message.Kind == BioChemHunterMessage.TransformRequest) TryTransformHunter(sender);
+            else if (message.Kind == BioChemHunterMessage.Strike) TryHunterStrike(sender, message.UnitUID);
+        }
+
+        // 按 G 变身：剩余学生 ≤ hunterTriggerStudents 时，未感染未被抓的存活学生可变身
+        private static void TryTransformHunter(ulong uid)
+        {
+            if (!enabled || !ServerClassActive() || uid == 0) return;
+            if (infected.Contains(uid) || hunters.Contains(uid) || killedTeachers.Contains(uid)) return;
+            if (!UnitManager.IsSingletonActive()) return;
+            Unit student = UnitManager.Instance.GetUnitByUID(uid);
+            if (student == null || !student.isActived || student.IsDead || student.IsStun) return;
+            if (student.UnitSubType != EUnitSubType.Student || student.CurState() == 103) return;
+            if (RemainingStudents() > Config.hunterTriggerStudents) return;
+            hunters.Add(uid);
+            hp[uid] = Config.hunterHp;
+            RevokeTaser(uid); // 猎手固定用近战：变身即收走吹箭（嘴部清空）
+            var message = new BioChemHunterMessage { Kind = BioChemHunterMessage.Transform, UnitUID = uid };
+            Broadcast(message);
+            ApplyHunterTransformLocal(message);
+            BroadcastState();
+            Log("[状态] " + GetName(uid) + " 变身成了老师猎手（HP " + Config.hunterHp + "）");
+        }
+
+        // 各端变身表现：模型放大 + 电弧特效 + 公告（hunterOrigScale 兼做"已放大"幂等标记）
+        private static void ApplyHunterTransformLocal(BioChemHunterMessage message)
+        {
+            if (!UnitManager.IsSingletonActive()) return;
+            Unit unit = UnitManager.Instance.GetUnitByUID(message.UnitUID);
+            if (unit == null || !unit.isActived || unit.model == null) return;
+            hunters.Add(message.UnitUID);
+            if (!hunterOrigScale.ContainsKey(message.UnitUID))
+            {
+                hunterOrigScale[message.UnitUID] = unit.model.gameObject.transform.localScale;
+                unit.model.gameObject.transform.localScale = unit.model.gameObject.transform.localScale * HunterScale;
+            }
+            unit.GetComponent<EffectComponent>()?.AddEffect(100004, 1f, Vector3.up, unit.transform, 2f);
+            if (message.UnitUID == UnitManager.Instance.localPlayerUID)
+            {
+                localMgMode = false; // 猎手固定近战：本地连发模式清掉
+            }
+            NotifyAll(GetName(message.UnitUID) + " 变身成了老师猎手！");
+        }
+
+        // 猎手被感染/还原：外观缩回原样（infected 名单走快照同步）
+        private static void RevertHunterVisual(ulong uid)
+        {
+            var message = new BioChemHunterMessage { Kind = BioChemHunterMessage.RevertVisual, UnitUID = uid };
+            Broadcast(message);
+            ApplyRevertVisualLocal(message);
+        }
+
+        private static void ApplyRevertVisualLocal(BioChemHunterMessage message)
+        {
+            hunters.Remove(message.UnitUID);
+            if (!UnitManager.IsSingletonActive()) return;
+            Unit unit = UnitManager.Instance.GetUnitByUID(message.UnitUID);
+            if (unit == null || unit.model == null) return;
+            if (hunterOrigScale.TryGetValue(message.UnitUID, out Vector3 origScale))
+                unit.model.gameObject.transform.localScale = origScale;
+        }
+
+        // 猎手近战：客户端选目标上报，服务端校验距离/冷却后结算（前摇只做挥手动画，伤害即时）
+        private static void TryHunterStrike(ulong hunterUid, ulong targetUid)
+        {
+            if (!enabled || !ServerClassActive() || !hunters.Contains(hunterUid)) return;
+            if (Time.unscaledTime < (hunterStrikeReadyAt.TryGetValue(hunterUid, out float readyAt) ? readyAt : 0f)) return;
+            if (!UnitManager.IsSingletonActive()) return;
+            Unit hunter = UnitManager.Instance.GetUnitByUID(hunterUid);
+            Unit target = UnitManager.Instance.GetUnitByUID(targetUid);
+            if (hunter == null || !hunter.isActived || hunter.IsDead || hunter.IsStun) return;
+            if (target == null || !target.isActived || target.IsDead || target.IsStun) return;
+            bool teacherTeam = target.UnitSubType == EUnitSubType.Teacher || infected.Contains(target.UID);
+            if (!teacherTeam || hunters.Contains(targetUid) || killedTeachers.Contains(targetUid)) return;
+            if ((target.Position - hunter.Position).sqrMagnitude > Mathf.Pow(HunterAttackRange + 0.5f, 2f)) return;
+            hunterStrikeReadyAt[hunterUid] = Time.unscaledTime + Config.hunterAttackInterval;
+            DamageTeacherTeam(targetUid, Config.hunterDamage, hunterUid);
+        }
+
+        // 猎手打老师：扣 HP，归零=永久击杀（不复活）；没死走 Hit 广播同步
+        private static void DamageTeacherTeam(ulong targetUid, int amount, ulong attackerUid)
+        {
+            int newHp = Mathf.Max(0, GetTeacherTeamHp(targetUid) - amount);
+            hp[targetUid] = newHp;
+            Log("[状态] 猎手 " + GetName(attackerUid) + " 近战命中 " + GetName(targetUid) + "，HP " + newHp);
+            if (newHp <= 0)
+            {
+                KillTeacher(targetUid);
+                return;
+            }
+            var hit = new BioChemHunterMessage { Kind = BioChemHunterMessage.Hit, UnitUID = targetUid, Hp = newHp };
+            Broadcast(hit);
+            ApplyHunterHitLocal(hit);
+        }
+
+        // 老师队伍（大老师+小老师）被打的扣血入口：大老师扣大老师上限、小老师扣小老师上限
+        private static int GetTeacherTeamHp(ulong uid)
+        {
+            if (hp.TryGetValue(uid, out int value)) return value;
+            bool isBig = UnitManager.IsSingletonActive()
+                && UnitManager.Instance.GetUnitByUID(uid)?.UnitSubType == EUnitSubType.Teacher;
+            return hp[uid] = isBig ? Config.teacherMaxHp : Config.miniMaxHp;
+        }
+
+        // 击杀出局：永久倒地（各端持续续晕压躺），不进 downedUntil 复活流程
+        private static void KillTeacher(ulong uid)
+        {
+            killedTeachers.Add(uid);
+            var kill = new BioChemDownMessage { Kind = BioChemDownMessage.Kill, UnitUID = uid, Position = Vector3.zero };
+            Broadcast(kill);
+            ApplyKillLocal(kill);
+            BroadcastState();
+            Log("[状态] " + GetName(uid) + " 被猎手击杀，出局！");
+        }
+
+        private static void ApplyKillLocal(BioChemDownMessage message)
+        {
+            if (!UnitManager.IsSingletonActive()) return;
+            killedTeachers.Add(message.UnitUID);
+            Unit unit = UnitManager.Instance.GetUnitByUID(message.UnitUID);
+            if (unit == null || !unit.isActived) return;
+            unit.GetComponent<TeacherStunComponent>()?.TryGetProjectileStun(Config.downSeconds);
+            unit.GetComponent<StudentStunComponent>()?.TryGetProjectileStun(Config.downSeconds);
+            NotifyAll(GetName(message.UnitUID) + " 被猎手击杀了！");
+        }
+
+        // 出局老师每帧续晕：stun 到期当帧立即续上（剩 2 秒，无站立空窗）
+        private static void TickKilledTeachers()
+        {
+            if (killedTeachers.Count == 0 || !UnitManager.IsSingletonActive()) return;
+            foreach (ulong uid in killedTeachers)
+            {
+                Unit unit = UnitManager.Instance.GetUnitByUID(uid);
+                if (unit == null || !unit.isActived) continue;
+                unit.GetComponent<TeacherStunComponent>()?.TryGetProjectileStun(2f);
+                unit.GetComponent<StudentStunComponent>()?.TryGetProjectileStun(2f);
+            }
+        }
+
+        // 老师全灭 → 直接判学生胜利（大老师+全部小老师都被猎手击杀）
+        private static void TickWinCheck()
+        {
+            if (!enabled || !NetRuntime.IsServer || !ServerClassActive() || killedTeachers.Count == 0) return;
+            if (!UnitManager.IsSingletonActive()) return;
+            bool any = false;
+            foreach (Unit unit in UnitManager.Instance.playerList)
+            {
+                if (unit == null || !unit.isPlayer || !unit.isActived || unit.IsDead) continue;
+                bool teacherTeam = unit.UnitSubType == EUnitSubType.Teacher || infected.Contains(unit.UID);
+                if (!teacherTeam) continue;
+                any = true;
+                if (!killedTeachers.Contains(unit.UID)) return;
+            }
+            if (!any) return;
+            Log("[状态] 老师阵营全灭，判学生胜利！");
+            NotifyAll("老师阵营全灭，学生胜利！");
+            finishClassMethod?.Invoke(MonoSingletonT<ClassroomManager>.Instance, new object[] { false, null });
+        }
+
+        private static readonly MethodInfo finishClassMethod =
+            AccessTools.Method(typeof(ClassroomManager), "FinishClass");
+        // 游戏源码拼写如此（Studeng）
+        private static readonly MethodInfo checkAllPunishedMethod =
+            AccessTools.Method(typeof(ClassroomManager), "CheckIfAllStudengPunished");
+
+        // CF 规则：学生阵营全灭（无未感染学生、无存活猎手）→ 老师立即胜利
+        private static void TickStudentWipeCheck()
+        {
+            if (!enabled || !NetRuntime.IsServer || !ServerClassActive() || infected.Count == 0) return;
+            if (RemainingStudents() > 0 || hunters.Count > 0) return;
+            if (!UnitManager.IsSingletonActive()) return;
+            Log("[状态] 学生全部被感染，老师胜利！");
+            NotifyAll("学生全部被感染，老师胜利！");
+            finishClassMethod?.Invoke(MonoSingletonT<ClassroomManager>.Instance, new object[] { true, null });
+        }
+
+        // 猎手固定只能用近战武器：两个物品输入总入口（MsgCenter 100）对猎手全部吞掉
+        private static bool HunterItemInputBlocked(Unit owner)
+        {
+            if (!enabled || owner == null || !owner.isPlayer) return false;
+            return hunters.Contains(owner.UID);
+        }
+
+        public static bool BeforeHunterStudentItemInput(StudentItemUseComponent __instance)
+        {
+            return !HunterItemInputBlocked(__instance.owner);
+        }
+
+        public static bool BeforeHunterMouthItemInput(MouthItemUseComponent __instance)
+        {
+            return !HunterItemInputBlocked(__instance.owner);
+        }
+
+        // 老师剑击弹体命中过滤放行猎手（原生只认 IsStudent）
+        public static void AfterSlashStudentFilter(UnityEngine.Collider collider, ref Unit __result)
+        {
+            if (__result != null || !enabled || !UnitManager.IsSingletonActive()) return;
+            ObjectModel componentInParent = collider != null ? collider.GetComponentInParent<ObjectModel>() : null;
+            Unit unit = componentInParent != null ? UnitManager.Instance.GetUnitByUID(componentInParent.UID) : null;
+            if (unit != null && unit.isActived && !unit.IsDead && hunters.Contains(unit.UID)) __result = unit;
+        }
+
+        // 服务端剑击结算：命中猎手 → 扣 HP（原生对 IsTeacher 目标会直接 return）
+        public static bool BeforeChalkHit(UnitMessageHandler __instance, ChalkHitRequest_C2S request)
+        {
+            if (!enabled || !NetRuntime.IsServer || !hunters.Contains(request.UnitUID)) return true;
+            if (killedTeachers.Contains(request.UnitUID)) return false;
+            DamageHunter(request.UnitUID, HunterTakenDamage, request.TeacherUID);
+            return false;
+        }
+
+        // 猎手被打（老师剑击/小老师击晕）：扣 HP，归零=直接感染
+        private static void DamageHunter(ulong uid, int amount, ulong attackerUid)
+        {
+            int newHp = Mathf.Max(0, GetHunterHp(uid) - amount);
+            hp[uid] = newHp;
+            var hit = new BioChemHunterMessage { Kind = BioChemHunterMessage.Hit, UnitUID = uid, Hp = newHp };
+            Broadcast(hit);
+            ApplyHunterHitLocal(hit);
+            Log("[状态] 猎手 " + GetName(uid) + " 被 " + GetName(attackerUid) + " 命中，HP " + newHp);
+            if (newHp <= 0)
+            {
+                hunters.Remove(uid);
+                RevertHunterVisual(uid);
+                InfectStudent(uid); // HP 没了直接感染成小老师（内部公告+快照）
+            }
+        }
+
+        private static void ApplyHunterHitLocal(BioChemHunterMessage message)
+        {
+            hp[message.UnitUID] = message.Hp;
+            if (!UnitManager.IsSingletonActive()) return;
+            Unit unit = UnitManager.Instance.GetUnitByUID(message.UnitUID);
+            if (unit != null && unit.isActived)
+                SingletonT<FxManager>.Instance.SpawnFx(ConfigManager.TaserSetting.characterHitEffectID, unit.Position + Vector3.up, Vector3.zero, 0uL);
+            if (message.UnitUID == UnitManager.Instance.localPlayerUID)
+                NotifySelf("你被击中了！剩余 HP " + message.Hp);
         }
 
         // ===== 模式开关与状态同步 =====
@@ -904,6 +1398,8 @@ namespace BioChem
         private static void ClearRoundState()
         {
             infected.Clear();
+            hunters.Clear();
+            killedTeachers.Clear();
             hp.Clear();
             stamina.Clear();
             pillarBinds.Clear();
@@ -913,12 +1409,26 @@ namespace BioChem
             downedUntil.Clear();
             serverSlowExpiries.Clear();
             selfSlowExpiries.Clear();
+            dartAmmo.Clear();
+            foodRefillReadyAt.Clear();
+            selfDartAmmo = Config.dartMaxAmmo; // 新一局备弹回满（与服务端懒初始化口径一致）
             selfStamina = -1f;
             localStunReadyAt = 0f;
             localMgMode = false;
             mgNextFireAt = 0f;
             mgFireUntil.Clear();
             lastSelfPosValid = false;
+            // 猎手外观还原（回合重置/换房时所有端各自还原本端放大的模型）
+            foreach (var pair in hunterOrigScale)
+            {
+                if (!UnitManager.IsSingletonActive()) break;
+                Unit unit = UnitManager.Instance.GetUnitByUID(pair.Key);
+                if (unit != null && unit.model != null) unit.model.gameObject.transform.localScale = pair.Value;
+            }
+            hunterOrigScale.Clear();
+            hunterStrikeReadyAt.Clear();
+            localHunterStrikeReadyAt = 0f;
+            hunterUnlockAnnounced = false;
         }
 
         private static void OnClassStateChanged(EClassroomState state)
@@ -940,7 +1450,17 @@ namespace BioChem
             RevokeTaser(playerUID);
             downedUntil.Remove(playerUID);
             serverSlowExpiries.Remove(playerUID);
+            dartAmmo.Remove(playerUID);
+            foodRefillReadyAt.Remove(playerUID);
             mgFireUntil.Remove(playerUID);
+            hunters.Remove(playerUID);
+            killedTeachers.Remove(playerUID);
+            hunterStrikeReadyAt.Remove(playerUID);
+            if (hunterOrigScale.Remove(playerUID) && UnitManager.IsSingletonActive())
+            {
+                Unit removedUnit = UnitManager.Instance.GetUnitByUID(playerUID);
+                if (removedUnit != null && removedUnit.model != null) removedUnit.model.gameObject.transform.localScale = Vector3.one;
+            }
             foreach (var key in new List<ulong>(pillarBinds.Keys))
                 if (pillarBinds[key].student == playerUID) { pillarBinds.Remove(key); pillarRetryAt.Remove(key); }
         }
@@ -955,6 +1475,8 @@ namespace BioChem
             version++;
             var dto = new BioChemStateDto { enabled = enabled, cfg = JsonUtility.ToJson(BioChemConfig.Instance) };
             foreach (ulong uid in infected) dto.infected.Add((long)uid);
+            foreach (ulong uid in hunters) dto.hunters.Add((long)uid);
+            foreach (ulong uid in killedTeachers) dto.killed.Add((long)uid);
             foreach (var pair in hp) { dto.hpUids.Add((long)pair.Key); dto.hpVals.Add(pair.Value); }
             foreach (var pair in stamina) { dto.stUids.Add((long)pair.Key); dto.stVals.Add(pair.Value); }
             // Notify 只随本次广播：客户端用它弹公告（服务端已 NotifyAll 过，自己不会再收到）。
@@ -990,6 +1512,23 @@ namespace BioChem
             infected.Clear();
             foreach (long uid in dto.infected)
                 if (uid != 0) infected.Add((ulong)uid);
+            hunters.Clear();
+            foreach (long uid in dto.hunters)
+                if (uid != 0) hunters.Add((ulong)uid);
+            killedTeachers.Clear();
+            foreach (long uid in dto.killed)
+                if (uid != 0) killedTeachers.Add((ulong)uid);
+            // 快照兜底：中途加入的端对已有猎手补放大会（幂等），出局的老师由 TickKilledTeachers 持续压躺
+            foreach (ulong uid in new List<ulong>(hunters))
+            {
+                if (hunterOrigScale.ContainsKey(uid) || !UnitManager.IsSingletonActive()) continue;
+                Unit unit = UnitManager.Instance.GetUnitByUID(uid);
+                if (unit != null && unit.isActived && unit.model != null)
+                {
+                    hunterOrigScale[uid] = unit.model.gameObject.transform.localScale;
+                    unit.model.gameObject.transform.localScale = unit.model.gameObject.transform.localScale * HunterScale;
+                }
+            }
             hp.Clear();
             for (int i = 0; i < dto.hpUids.Count && i < dto.hpVals.Count; i++)
                 if (dto.hpUids[i] != 0) hp[(ulong)dto.hpUids[i]] = dto.hpVals[i];
@@ -1014,6 +1553,17 @@ namespace BioChem
             PruneSelfSlow();
             TickSelfStamina(dt);
             TickMachineGun();
+            if (enabled)
+            {
+                TickHunterMelee();
+                TickKilledTeachers();
+                if (NetRuntime.IsServer)
+                {
+                    TickHunterUnlockAnnounce();
+                    TickWinCheck();
+                    TickStudentWipeCheck();
+                }
+            }
             if (NetRuntime.IsServer)
             {
                 TickPillarInfection();
@@ -1026,6 +1576,19 @@ namespace BioChem
                 }
             }
             HandleKeys();
+        }
+
+        // 变身解锁公告：剩余学生首次降到阈值时全端提示一次（服务端）
+        private static void TickHunterUnlockAnnounce()
+        {
+            if (hunterUnlockAnnounced || !ServerClassActive()) return;
+            int remaining = RemainingStudents();
+            if (remaining == 0 || remaining > Config.hunterTriggerStudents) return;
+            hunterUnlockAnnounced = true;
+            string announce = "最后 " + remaining + " 名学生可以按 G 变身老师猎手！";
+            NotifyAll(announce);
+            BroadcastState(announce);
+            Log("[状态] " + announce);
         }
 
         private static void PruneSelfSlow()
@@ -1110,6 +1673,62 @@ namespace BioChem
                 }
             }
             if (kb.GetKeyDown(StunKey) && !InputOverFrozen()) TryMiniStun();
+            // G 变身老师猎手：剩余学生 ≤ hunterTriggerStudents 时解锁（服务端会复验）
+            if (kb.GetKeyDown(HunterKey) && !InputOverFrozen() && CanTransformHunter()) SendTransformRequest();
+        }
+
+        internal static readonly KeyCode HunterKey = KeyCode.G;   // 学生变身为老师猎手
+
+        private static bool CanTransformHunter()
+        {
+            if (!enabled || !CanClassAct() || !UnitManager.IsSingletonActive()) return false;
+            ulong self = UnitManager.Instance.localPlayerUID;
+            if (infected.Contains(self) || hunters.Contains(self)) return false;
+            Unit selfUnit = UnitManager.Instance.GetUnitByUID(self);
+            if (selfUnit == null || !selfUnit.isActived || selfUnit.IsDead || selfUnit.IsStun) return false;
+            if (selfUnit.UnitSubType != EUnitSubType.Student || selfUnit.CurState() == 103) return false;
+            return RemainingStudents() <= Config.hunterTriggerStudents;
+        }
+
+        private static void SendTransformRequest()
+        {
+            var message = new BioChemHunterMessage { Kind = BioChemHunterMessage.TransformRequest };
+            if (NetRuntime.IsServer) OnServerHunter(null, message);
+            else if (RoomManager.IsSingletonActive()) RoomManager.Instance.SendToServer(message);
+        }
+
+        // 猎手近战：按住左键按 hunterAttackInterval 挥击（客户端选目标+本地冷却，服务端复验距离/冷却）
+        private static void TickHunterMelee()
+        {
+            if (!enabled || !hunters.Contains(UnitManager.IsSingletonActive() ? UnitManager.Instance.localPlayerUID : 0)) return;
+            if (!Input.GetMouseButtonDown(0)) return; // 单击挥击（连点受冷却限制）
+            if (Time.unscaledTime < localHunterStrikeReadyAt) return;
+            if (!CanClassAct() || !UnitManager.IsSingletonActive()) return;
+            ulong self = UnitManager.Instance.localPlayerUID;
+            Unit selfUnit = UnitManager.Instance.GetUnitByUID(self);
+            if (selfUnit == null || !selfUnit.isActived || selfUnit.IsDead || selfUnit.IsStun) return;
+            Unit target = FindHunterTarget(selfUnit);
+            if (target == null) return;
+            localHunterStrikeReadyAt = Time.unscaledTime + Config.hunterAttackInterval;
+            selfUnit.GetComponent<AnimationComponent>()?.PlayAnimSync("Throw1");
+            var message = new BioChemHunterMessage { Kind = BioChemHunterMessage.Strike, UnitUID = target.UID };
+            if (NetRuntime.IsServer) OnServerHunter(null, message);
+            else if (RoomManager.IsSingletonActive()) RoomManager.Instance.SendToServer(message);
+        }
+
+        private static Unit FindHunterTarget(Unit self)
+        {
+            Unit best = null;
+            float bestDist = HunterAttackRange;
+            foreach (Unit unit in UnitManager.Instance.playerList)
+            {
+                if (unit == null || !unit.isActived || unit.IsDead || unit.IsStun) continue;
+                bool teacherTeam = unit.UnitSubType == EUnitSubType.Teacher || infected.Contains(unit.UID);
+                if (!teacherTeam || hunters.Contains(unit.UID) || killedTeachers.Contains(unit.UID)) continue;
+                float dist = Vector3.Distance(self.Position, unit.Position);
+                if (dist < bestDist) { bestDist = dist; best = unit; }
+            }
+            return best;
         }
 
         private static void SendToggleDart()
@@ -1169,6 +1788,7 @@ namespace BioChem
             NetworkClient.RegisterHandler<BioChemDartMessage>(OnClientDart, true);
             NetworkClient.RegisterHandler<BioChemStunMessage>(OnClientStun, true);
             NetworkClient.RegisterHandler<BioChemDownMessage>(OnClientDown, true);
+            NetworkClient.RegisterHandler<BioChemHunterMessage>(OnClientHunter, true);
             // 重进房间 = 全新连接：清掉上一局残留（enabled/infected 等待 ≤5s 快照重建）。
             // 房主也会走 InitClient，但 NetworkServer.active 已为 true，不会误清服务端权威状态
             if (!NetworkServer.active)
@@ -1183,6 +1803,7 @@ namespace BioChem
             NetworkServer.RegisterHandler<BioChemDartMessage>(OnServerDart, true);
             NetworkServer.RegisterHandler<BioChemStunMessage>(OnServerStun, true);
             NetworkServer.RegisterHandler<BioChemWriteMessage>(OnServerWrite, true);
+            NetworkServer.RegisterHandler<BioChemHunterMessage>(OnServerHunter, true);
             // 新建房间：清掉上一局服务端瞬态（enabled 是房主设置，跨房保留）
             ClearRoundState();
         }
@@ -1191,6 +1812,7 @@ namespace BioChem
         {
             if (NetworkServer.active) return;
             if (message.Kind == BioChemDartMessage.Hit) ApplyDartHit(message);
+            else if (message.Kind == BioChemDartMessage.AmmoSync) ApplyAmmoSyncLocal(message);
             else if (message.Kind == BioChemDartMessage.MgShot)
             {
                 // 射手自己跳过（本地已预测渲染）；其他端渲染弹体（原生拖尾/音效由 PlayFire 播放）
@@ -1215,7 +1837,16 @@ namespace BioChem
         {
             if (NetworkServer.active) return;
             if (message.Kind == BioChemDownMessage.Down) ApplyDownLocal(message);
-            else ApplyRespawnLocal(message);
+            else if (message.Kind == BioChemDownMessage.Respawn) ApplyRespawnLocal(message);
+            else ApplyKillLocal(message);
+        }
+
+        private static void OnClientHunter(BioChemHunterMessage message)
+        {
+            if (NetworkServer.active) return;
+            if (message.Kind == BioChemHunterMessage.Transform) ApplyHunterTransformLocal(message);
+            else if (message.Kind == BioChemHunterMessage.Hit) ApplyHunterHitLocal(message);
+            else if (message.Kind == BioChemHunterMessage.RevertVisual) ApplyRevertVisualLocal(message);
         }
 
         // ===== 工具 =====
@@ -1281,6 +1912,7 @@ namespace BioChem
 
         internal static float StunCooldownRemain => Mathf.Max(0f, localStunReadyAt - Time.unscaledTime);
         internal static int SelfSlowStacks { get { PruneSelfSlow(); return selfSlowExpiries.Count; } }
+        internal static int SelfDartAmmo => selfDartAmmo;
 
         internal static void Cleanup()
         {

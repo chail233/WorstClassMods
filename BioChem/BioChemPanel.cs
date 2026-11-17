@@ -322,7 +322,13 @@ namespace BioChem
                 Get=()=>ModEntry.Config.miniStunRange, Set=v=>ModEntry.Config.miniStunRange=v },
             new NumField { Label="吹箭伤害", Step=1, Min=1, Max=99, Int=true,
                 Get=()=>ModEntry.Config.dartDamage, Set=v=>ModEntry.Config.dartDamage=Mathf.RoundToInt(v) },
-            new NumField { Label="连发间隔(秒)", Step=0.1f, Min=0.2f, Max=10f,
+            new NumField { Label="每感染加伤", Step=0.05f, Min=0f, Max=3f,
+                Get=()=>ModEntry.Config.dartDamageBonusPerInfected, Set=v=>ModEntry.Config.dartDamageBonusPerInfected=v },
+            new NumField { Label="备弹上限", Step=10, Min=1, Max=999, Int=true,
+                Get=()=>ModEntry.Config.dartMaxAmmo, Set=v=>ModEntry.Config.dartMaxAmmo=Mathf.RoundToInt(v) },
+            new NumField { Label="食物补弹", Step=10, Min=0, Max=999, Int=true,
+                Get=()=>ModEntry.Config.dartAmmoPerFood, Set=v=>ModEntry.Config.dartAmmoPerFood=Mathf.RoundToInt(v) },
+            new NumField { Label="连发间隔(秒)", Step=0.1f, Min=0.1f, Max=10f,
                 Get=()=>ModEntry.Config.fireInterval, Set=v=>ModEntry.Config.fireInterval=v },
             new NumField { Label="每层减速", Step=0.05f, Min=0.05f, Max=0.8f,
                 Get=()=>ModEntry.Config.dartSlowPerStack, Set=v=>ModEntry.Config.dartSlowPerStack=v },
@@ -332,18 +338,26 @@ namespace BioChem
                 Get=()=>ModEntry.Config.dartSlowSeconds, Set=v=>ModEntry.Config.dartSlowSeconds=v },
             new NumField { Label="倒地复活(秒)", Step=1, Min=1, Max=30, Int=true,
                 Get=()=>ModEntry.Config.downSeconds, Set=v=>ModEntry.Config.downSeconds=Mathf.RoundToInt(v) },
+            new NumField { Label="猎手解锁人数", Step=1, Min=1, Max=50, Int=true,
+                Get=()=>ModEntry.Config.hunterTriggerStudents, Set=v=>ModEntry.Config.hunterTriggerStudents=Mathf.RoundToInt(v) },
+            new NumField { Label="猎手HP", Step=1, Min=1, Max=999, Int=true,
+                Get=()=>ModEntry.Config.hunterHp, Set=v=>ModEntry.Config.hunterHp=Mathf.RoundToInt(v) },
+            new NumField { Label="猎手伤害", Step=1, Min=1, Max=99, Int=true,
+                Get=()=>ModEntry.Config.hunterDamage, Set=v=>ModEntry.Config.hunterDamage=Mathf.RoundToInt(v) },
+            new NumField { Label="猎手攻速(秒)", Step=0.1f, Min=0.1f, Max=10f,
+                Get=()=>ModEntry.Config.hunterAttackInterval, Set=v=>ModEntry.Config.hunterAttackInterval=v },
         };
 
         private static float BuildGrid(Transform parent, float innerW, float bodyH)
         {
             float cellW = (innerW - 12f) / 2f;
-            // 9 行：窗口偏矮时行高压缩到 30px 起步，避免压到关闭按钮
-            float rowH = Mathf.Clamp(bodyH / 9f, 30f, 40f);
+            // 12 行：窗口偏矮时行高压缩到 26px 起步，避免压到关闭按钮（24 项数值正好排满两列十二行）
+            float rowH = Mathf.Clamp(bodyH / 12f, 26f, 40f);
             int labelSize = Mathf.Max(15, baseFontSize - 5);
             for (int i = 0; i < NumFields.Length; i++)
             {
                 NumField f = NumFields[i];
-                int col = i / 9, row = i % 9;
+                int col = i / 12, row = i % 12;
                 var cell = new GameObject("数值_" + f.Label, typeof(RectTransform));
                 cell.transform.SetParent(parent, false);
                 float x = -innerW / 2f + col * (cellW + 12f);
@@ -366,7 +380,7 @@ namespace BioChem
                     () => Adjust(f, f.Step));
                 Place(f.PlusBtn.GetComponent<RectTransform>(), new Vector2(0f, 1f), new Vector2(0f, 1f), new Vector2(24f, rowH - 8f), new Vector2(cellW - 28f, 0f));
             }
-            return 9f * rowH;
+            return 12f * rowH;
         }
 
         private static void Adjust(NumField f, float delta)
@@ -382,13 +396,23 @@ namespace BioChem
         private static string BuildRulesText()
         {
             var c = ModEntry.Config;
+            // 吹箭伤害句：按感染加伤开关动态生成（关=固定伤害；开=伤害随小老师人数递增，带当前实时值）
+            float bonus = ModEntry.DartDamageBonus();
+            string dartDamageText = c.dartDamageBonusPerInfected > 0f
+                ? "命中伤害 " + ModEntry.EffectiveDartDamage() + "（基础 " + c.dartDamage + "，每有小老师 +"
+                    + (c.dartDamageBonusPerInfected * 100f).ToString("0") + "% 系数、上限 +" + (ModEntry.DartDamageBonusCap * 100f).ToString("0")
+                    + "%，当前已感染 " + ModEntry.infected.Count + " 人 → 加成 +" + (bonus * 100f).ToString("0") + "%）"
+                : "命中 -" + c.dartDamage + " HP";
             return "规则：\n" +
                 "· 老师把真人学生挂上罚站柱超过 " + c.pillarInfectSeconds.ToString("0") + " 秒，自动释放并感染为小老师\n" +
                 "· 小老师：学生功能禁用（看不到其他玩家 ID）、捣蛋不计分；HP " + c.miniMaxHp + "，写板书长按读条缓慢回体力，走路每秒耗 " + c.staminaDrainPerSecond.ToString("0.#") + " 体力\n" +
                 "· 小老师按 F 击晕身边学生 " + c.miniStunSeconds.ToString("0.#") + " 秒：耗体力 " + c.staminaCostPerStun.ToString("0.#") + "、冷却 " + c.miniStunCooldownSeconds.ToString("0.#") + " 秒、距离 " + c.miniStunRange.ToString("0.#") + " 米，体力不足无法击晕\n" +
                 "· 大老师 HP " + c.teacherMaxHp + "，写板书回复 " + c.teacherHpPerWrite + " HP；HP 归零晕倒 " + c.downSeconds.ToString("0") + " 秒后从办公室复活并刷新状态\n" +
-                "· 学生按 1 掏出/收起连发吹箭筒（嘴部叼持，右键瞄准）：按住左键每 " + c.fireInterval.ToString("0.#") + " 秒射一支，命中老师/小老师 -" + c.dartDamage + " HP、每层减速 " + (c.dartSlowPerStack * 100f).ToString("0") + "%（持续 " + c.dartSlowSeconds.ToString("0.#") + " 秒，最多 " + c.dartSlowMaxStacks + " 层）；无眩晕，打中学生无效\n" +
-                "· 获胜机制与原版一致；数值改动（房主）即时同步全员\n" +
+                "· 学生按 1 掏出/收起连发吹箭筒（嘴部叼持，右键瞄准）：按住左键每 " + c.fireInterval.ToString("0.#") + " 秒射一支，" + dartDamageText + "；每层减速 " + (c.dartSlowPerStack * 100f).ToString("0") + "%（持续 " + c.dartSlowSeconds.ToString("0.#") + " 秒，最多 " + c.dartSlowMaxStacks + " 层）；无眩晕，打中学生无效\n" +
+                "· 吹箭备弹 " + c.dartMaxAmmo + " 发（新一局自动回满），耗尽后无法射击" + (c.dartAmmoPerFood > 0 ? "；吃完一份食物补 " + c.dartAmmoPerFood + " 发（火锅食材也计入）" : "") + "\n" +
+                "· 生化胜负：捣蛋值整体不生效（捣蛋进度、学生捣蛋胜利、机制奖励全部冻结）；倒计时结束=幸存学生获胜，老师队伍在倒计时内抓完全部学生则老师获胜\n" +
+                "· 老师猎手：剩余学生 ≤ " + c.hunterTriggerStudents + " 人时学生按 G 变身（变大+特效，HP " + c.hunterHp + "）；近战左键挥击伤害 " + c.hunterDamage + "（间隔 " + c.hunterAttackInterval.ToString("0.#") + "s、范围 2.2m）；被老师剑击/小老师击晕命中扣 2 HP，HP 清零直接感染；猎手击杀的老师永久出局不复活，老师全灭=学生立即获胜\n" +
+                "· 数值改动（房主）即时同步全员\n" +
                 "· 房主本机数值持久化在 LocalLow Configs/biochem/biochem.json";
         }
 
