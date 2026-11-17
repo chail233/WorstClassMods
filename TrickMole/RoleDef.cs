@@ -38,6 +38,7 @@ namespace TrickMole
     {
         internal static List<RoleDef> Roles = Defaults();
         private const string FileName = "trickmole.json";
+        private static string s_ConfigPath;
 
         // 内置角色：配置文件里缺哪个就按默认补哪个（count=0 仍可禁用）
         private static List<RoleDef> Defaults()
@@ -88,6 +89,7 @@ namespace TrickMole
             {
                 Directory.CreateDirectory(configDir);
                 string path = Path.Combine(configDir, FileName);
+                s_ConfigPath = path;
                 if (File.Exists(path))
                 {
                     List<RoleDef> parsed = SplitRoleObjects(File.ReadAllText(path));
@@ -108,6 +110,21 @@ namespace TrickMole
                 File.WriteAllText(path, WriteRolesJson(Roles));
             }
             catch (Exception e) { log?.Invoke("角色配置加载失败，使用内置默认：" + e.Message); }
+        }
+
+        // 面板编辑后写回磁盘（每台机器各自的配置；联机角色分配以房主配置为准）
+        internal static void Save(Action<string> log)
+        {
+            if (s_ConfigPath == null) return;
+            try { File.WriteAllText(s_ConfigPath, WriteRolesJson(Roles)); }
+            catch (Exception e) { log?.Invoke("角色配置保存失败：" + e.Message); }
+        }
+
+        internal static void ResetToDefaults(Action<string> log)
+        {
+            Roles = Defaults();
+            Save(log);
+            log?.Invoke("[状态] 角色配置已恢复内置默认");
         }
 
         // 手工拼 {"roles":[...]}：文件里仍是人类可读的单个 JSON 对象，但组装不经过会被跳过 List 字段的序列化器

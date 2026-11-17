@@ -18,6 +18,26 @@
       <HintPath>$(ManagedDir)\UnityEngine.PhysicsModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- 配置面板剥克隆窗框的动画残件：Animator -->
+    <Reference Include="UnityEngine.AnimationModule">
+      <HintPath>$(ManagedDir)\UnityEngine.AnimationModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- 角色配置面板：Image/Button/InputField/CanvasScaler 等 UGUI 控件全在这个程序集（本变体无独立 EventSystems.dll） -->
+    <Reference Include="UnityEngine.UI">
+      <HintPath>$(ManagedDir)\UnityEngine.UI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- F6 的 IMGUI Event.keyCode -->
+    <Reference Include="UnityEngine.InputLegacyModule">
+      <HintPath>$(ManagedDir)\UnityEngine.InputLegacyModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- 拉起游戏设置窗口：UIManager.ShowUI 返回 UniTask<>，返回值类型所在程序集必须引用（CS0012） -->
+    <Reference Include="UniTask">
+      <HintPath>$(ManagedDir)\UniTask.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 
 </Project>
