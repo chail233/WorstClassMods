@@ -19,3 +19,6 @@ Workshop/.content/
 
 # ZCode 本地工具配置
 .zcode/
+
+# 本地临时工具（UnityPy 等资产解析用）
+.tools/

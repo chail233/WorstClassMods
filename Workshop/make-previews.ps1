@@ -130,6 +130,31 @@ $chalkDeco = {
     $g.DrawPolygon($starPen, $pts)
 }
 
+# ---- BioChem：毒绿渐变 + 病毒粒子 + 气泡 ----
+$bioDeco = {
+    param($g, $w, $h)
+    $virusBrush = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(150, 120, 255, 140))
+    $coreBrush = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(170, 16, 56, 32))
+    $spikePen = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(190, 160, 255, 170)), 4
+    foreach ($v in @(@(120, 430, 54), @(664, 150, 40), @(618, 468, 26))) {
+        $cx = $v[0]; $cy = $v[1]; $r = $v[2]
+        # 刺突
+        for ($i = 0; $i -lt 12; $i++) {
+            $a = $i * [Math]::PI / 6
+            $g.DrawLine($spikePen,
+                [float]($cx + [Math]::Cos($a) * ($r + 10)), [float]($cy + [Math]::Sin($a) * ($r + 10)),
+                [float]($cx + [Math]::Cos($a) * ($r + 26)), [float]($cy + [Math]::Sin($a) * ($r + 26)))
+        }
+        $g.FillEllipse($virusBrush, $cx - $r, $cy - $r, 2 * $r, 2 * $r)
+        $g.FillEllipse($coreBrush, $cx - $r / 2, $cy - $r / 2, $r, $r)
+    }
+    # 漂浮气泡
+    $bubPen = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(120, 200, 255, 210)), 2
+    foreach ($b in @(@(240, 120, 18), @(302, 172, 10), @(560, 330, 14), @(706, 382, 8))) {
+        $g.DrawEllipse($bubPen, $b[0], $b[1], 2 * $b[2], 2 * $b[2])
+    }
+}
+
 New-Preview -OutPath (Join-Path $root 'PlaygroundMusic\preview.png') `
     -Title '外高音乐扩展' -Subtitle '操场广播曲库扩展 · 自定义 MP3 · 全员曲库协商' `
     -Tag 'Worst Class Ever Mod' -ColorTop '#3A1C71' -ColorBottom '#D76D77' -Decorate $musicDeco
@@ -137,3 +162,8 @@ New-Preview -OutPath (Join-Path $root 'PlaygroundMusic\preview.png') `
 New-Preview -OutPath (Join-Path $root 'TrickMole\preview.png') `
     -Title '课堂角色' -Subtitle '每局随机分配身份 · 角色与数值均可配置扩展' `
     -Tag 'Worst Class Ever Mod' -ColorTop '#2E5339' -ColorBottom '#17281D' -Decorate $chalkDeco
+
+New-Item -ItemType Directory -Force -Path (Join-Path $root 'BioChem') | Out-Null
+New-Preview -OutPath (Join-Path $root 'BioChem\preview.png') `
+    -Title '生化模式' -Subtitle '挂柱感染 · 小老师体力机制 · 连发吹箭' `
+    -Tag 'Worst Class Ever Mod' -ColorTop '#2F6D4F' -ColorBottom '#0C1F16' -Decorate $bioDeco
