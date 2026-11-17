@@ -429,7 +429,28 @@ namespace TrickMole
         {
             version++;
             if (!RoomManager.IsSingletonActive() || !NetworkServer.active) return;
-            string json = BuildAssignmentsJson();
+            var snapshot = new MoleAssignList();
+            foreach (var pair in assigned)
+                snapshot.entries.Add(new MoleAssignEntry { uid = (long)pair.Key, roleJson = JsonUtility.ToJson(pair.Value) });
+            // 序列化双保险：优先 JsonUtility（其输出在客机端解析已被证实可靠）；
+            // 个别环境它会把含 entries 的快照稳定序列化成空串（2.3.x 工坊主机实测），此时手工拼装兜底
+            string json = null;
+            Exception buildError = null;
+            try { json = JsonUtility.ToJson(snapshot); }
+            catch (Exception e) { buildError = e; }
+            if (string.IsNullOrEmpty(json) && assigned.Count > 0)
+            {
+                json = BuildAssignmentsJson();
+                Log("[警告] 角色快照 JsonUtility 序列化" + (buildError != null ? "抛异常：" + buildError.Message : "结果为空") + "，已用手工拼装兜底（" + json.Length + " 字节）");
+            }
+            // 主机端回读自检：与客机同一套 JsonUtility 解析，回读失败 = 客机也必然解析失败
+            string roundtrip = null;
+            try
+            {
+                var check = JsonUtility.FromJson<MoleAssignList>(json);
+                roundtrip = check != null && check.entries != null ? check.entries.Count.ToString() : "null";
+            }
+            catch (Exception e) { roundtrip = "抛异常:" + e.Message; }
             RoomManager.Instance.BroadcastToAllExceptHost(
                 new MoleSelectMessage { Version = version, AssignmentsJson = json }, 0);
             // 诊断：内容变化必打，稳定重广播每 60 秒打一次（与遥测/客机日志对账用）
@@ -437,8 +458,10 @@ namespace TrickMole
             {
                 lastBroadcastJson = json;
                 nextBroadcastLog = Time.unscaledTime + 60f;
-                Log("[状态] 广播角色快照 v" + version + "：" + assigned.Count + " 条，JSON " + (json != null ? json.Length : 0) + " 字节"
-                    + (assigned.Count > 0 && string.IsNullOrEmpty(json) ? "（异常：有分配但快照为空！）" : ""));
+                int prefixLen = Math.Min(200, json != null ? json.Length : 0);
+                Log("[状态] 广播角色快照 v" + version + "：" + assigned.Count + " 条，JSON " + (json != null ? json.Length : 0) + " 字节，回读=" + roundtrip
+                    + (assigned.Count > 0 && string.IsNullOrEmpty(json) ? "（异常：有分配但快照为空！）" : "")
+                    + "\n快照前缀：" + (json != null ? json.Substring(0, prefixLen) : "null"));
             }
         }
 
@@ -1163,25 +1186,29 @@ namespace TrickMole
             NetworkServer.RegisterHandler<MolePushMessage>(OnServerPush, true);
         }
 
-        // 客机应用签名去重：全量重广播（Version 递增但内容不变）不重复打日志
-        private static string lastSelectSig = "\u0001";
-
         private static void OnMoleSelect(MoleSelectMessage message)
         {
             if (NetworkServer.active) return;
-            // Version 只作诊断：Mirror 可靠有序通道内不会收到过期消息，
-            // 跨房间是新连接（version 静态值跨房间不重置，绝不能拿它当过期门槛）
+            string raw = message.AssignmentsJson;
             List<MoleAssignEntry> entries;
             try
             {
-                entries = string.IsNullOrEmpty(message.AssignmentsJson)
+                entries = string.IsNullOrEmpty(raw)
                     ? new List<MoleAssignEntry>()
-                    : JsonUtility.FromJson<MoleAssignList>(message.AssignmentsJson).entries;
+                    : JsonUtility.FromJson<MoleAssignList>(raw).entries;
             }
             catch (Exception e)
             {
-                Log("角色同步包解析失败 v" + message.Version + "：" + e.Message);
+                Log("角色同步包解析失败 v" + message.Version + "：len=" + (raw?.Length ?? 0) + "，" + e.Message
+                    + "，包前缀：" + (string.IsNullOrEmpty(raw) ? "空" : raw.Substring(0, Math.Min(160, raw.Length))));
                 return; // 畸形包不应用，等下一轮全量重广播自愈
+            }
+            if (entries == null)
+            {
+                // JsonUtility 对异形包可能返回 null entries（此前静默 NRE 被 Mirror 吞掉），显式记录
+                Log("[警告] 角色快照解析出 null entries v" + message.Version + "：len=" + (raw?.Length ?? 0)
+                    + "，包前缀：" + (string.IsNullOrEmpty(raw) ? "空" : raw.Substring(0, Math.Min(160, raw.Length))));
+                entries = new List<MoleAssignEntry>();
             }
             version = message.Version;
             var sig = new System.Text.StringBuilder();
@@ -1195,10 +1222,16 @@ namespace TrickMole
                 RoleDef role = ParseRole(entry.roleJson);
                 if (role != null) assigned[(ulong)entry.uid] = role;
             }
-            if (signature != lastSelectSig)
+            // 诊断：长度/条数/应用数任一变化必打（同内容重广播不打防刷屏），带包前缀可与主机日志/遥测对账
+            int rawLen = raw?.Length ?? 0;
+            if (rawLen != lastLoggedRawLen || entries.Count != lastLoggedEntryCount || assigned.Count != lastLoggedApplied)
             {
-                lastSelectSig = signature;
-                Log("[状态] 角色同步 v" + message.Version + "：应用 " + assigned.Count + " 条分配" + (assigned.Count == 0 ? "（清场）" : ""));
+                lastLoggedRawLen = rawLen;
+                lastLoggedEntryCount = entries.Count;
+                lastLoggedApplied = assigned.Count;
+                Log("[状态] 角色同步 v" + message.Version + "：len=" + rawLen + "，解析 " + entries.Count + " 条 → 应用 " + assigned.Count + " 条"
+                    + (entries.Count > 0 && assigned.Count == 0 ? "（异常：有条目但角色全解析失败！）" : "")
+                    + "，包前缀：" + (string.IsNullOrEmpty(raw) ? "空" : raw.Substring(0, Math.Min(160, rawLen))));
             }
             // 失去角色的捣蛋累计与免伤状态一并清掉（本地 UI 口径）
             var stale = new HashSet<ulong>();
@@ -1219,10 +1252,35 @@ namespace TrickMole
             }
         }
 
+        private static int lastLoggedRawLen = -1;
+        private static int lastLoggedEntryCount = -1;
+        private static int lastLoggedApplied = -1;
+
+        private static string lastBadRolePrefix;
+
         private static RoleDef ParseRole(string json)
         {
-            try { return string.IsNullOrEmpty(json) ? null : JsonUtility.FromJson<RoleDef>(json); }
-            catch { return null; }
+            try
+            {
+                if (string.IsNullOrEmpty(json)) return null;
+                RoleDef role = JsonUtility.FromJson<RoleDef>(json);
+                if (role == null && json != lastBadRolePrefix)
+                {
+                    lastBadRolePrefix = json;
+                    Log("[警告] 角色条目解析为 null：len=" + json.Length + "，前缀：" + json.Substring(0, Math.Min(160, json.Length)));
+                }
+                return role;
+            }
+            catch (Exception e)
+            {
+                string prefix = json != null ? json.Substring(0, Math.Min(160, json.Length)) : "null";
+                if (prefix != lastBadRolePrefix)
+                {
+                    lastBadRolePrefix = prefix;
+                    Log("[警告] 角色条目解析异常：" + e.Message + "，前缀：" + prefix);
+                }
+                return null;
+            }
         }
 
         // 客机：收到免伤状态变更（获得/消耗），本地对齐并弹提示
