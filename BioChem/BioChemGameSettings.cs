@@ -12,10 +12,11 @@ namespace BioChem
     {
         public static UISettingView View;      // 已嵌入的窗口实例
         public static int PageIndex = -1;      // 我们的页在 panelList 里的下标
-        private static readonly HashSet<int> embeddedIds = new HashSet<int>();
         private static bool pendingSwitch;     // ShowUI 异步开窗后轮询到实例再跳页
         private static float pendingSwitchUntil;
         private static float scanAt;           // 场景实例扫描节流（FindObjectsOfTypeAll 很贵）
+        private static int lastOpenLogId;      // 诊断：设置窗口打开状态变化时打一条
+        private static bool hidBattleHud;      // F7 直接开设置时临时收起的对战 HUD（ESC 菜单路径由菜单背景遮挡，不需要）
 
         public static bool Embedded => View != null && PageIndex >= 0;
 
@@ -29,6 +30,9 @@ namespace BioChem
                 if (Time.unscaledTime > pendingSwitchUntil)
                 {
                     pendingSwitch = false;
+                    RestoreBattleHud();
+                    ModEntry.Log("[诊断] 等待设置窗口加载超时，回退自建面板");
+                    BioChemPanel.Open();
                 }
                 else
                 {
@@ -48,23 +52,38 @@ namespace BioChem
                         if (Embedded && View == view)
                         {
                             BioChemPanel.HideForEmbedded(); // 自建面板退场（不动输入规则，游戏设置窗口的规则还开着）
-                            view.SwitchTab(PageIndex);
+                            try { view.SwitchTab(PageIndex); }
+                            catch (Exception e) { ModEntry.Log("[状态] 跳到生化页失败：" + e.Message); }
+                            LogTabState(view, "F7 跳页后");
                         }
                     }
                 }
             }
 
-            // 玩家手动开过设置窗口（或主菜单挂着）→ 自动挂页
-            if (!Embedded && Time.unscaledTime >= scanAt)
+            // 窗口实例可能被回收重建：优先跟随真正打开的那个实例挂页，池里闲置实例兜底
+            if (Time.unscaledTime >= scanAt)
             {
                 scanAt = Time.unscaledTime + 1f;
-                UISettingView view = FindSceneView();
-                if (view != null && !embeddedIds.Contains(view.GetInstanceID()))
+                UISettingView open = GetOpenView();
+                if (open != null && open.GetInstanceID() != lastOpenLogId)
+                {
+                    lastOpenLogId = open.GetInstanceID();
+                    ModEntry.Log("[诊断] 设置窗口已打开：实例=" + lastOpenLogId
+                        + " 嵌入实例=" + (View != null ? View.GetInstanceID() : 0)
+                        + " 页=" + PageIndex);
+                    if (Embedded && View == open) LogTabState(open, "开窗扫描", true);
+                }
+                else if (open == null)
+                {
+                    lastOpenLogId = 0;
+                }
+                UISettingView target = open != null ? open : (Embedded ? null : FindSceneView());
+                if (target != null && (!Embedded || View != target))
                 {
                     try
                     {
-                        Embed(view);
-                        BioChemPanel.HideForEmbedded(); // 玩家手动开的设置窗口挂上了页：自建面板退场
+                        Embed(target);
+                        if (open != null) BioChemPanel.HideForEmbedded(); // 玩家手动开的设置窗口挂上了页：自建面板退场
                     }
                     catch (Exception e) { ModEntry.Log("[状态] 嵌入游戏设置窗口失败（不影响自建面板）：" + e.Message); }
                 }
@@ -72,6 +91,9 @@ namespace BioChem
 
             // 设置窗口开着时保持数值/开关文案刷新
             if (Embedded && IsSettingOpen()) BioChemPanel.RefreshPanelValues();
+
+            // F7 打开的设置窗口关闭后，把临时收起的对战 HUD 还回去
+            if (hidBattleHud && !IsSettingOpen()) RestoreBattleHud();
         }
 
         // ===== F7：打开游戏设置窗口并跳到生化页；嵌不进去返回 false 走自建面板 =====
@@ -98,10 +120,18 @@ namespace BioChem
                     }
                     if (!Embedded || View != open) return false;
                     BioChemPanel.HideForEmbedded();
-                    open.SwitchTab(PageIndex);
+                    try { open.SwitchTab(PageIndex); }
+                    catch (Exception e) { ModEntry.Log("[状态] 跳到生化页失败：" + e.Message); }
+                    LogTabState(open, "F7 跳页后");
                     return true;
                 }
-                if (ui.IsUIOpenOrLoading(EUIWindowType.Setting)) return true; // 加载中：Tick 轮询完成后自动跳页
+                if (ui.IsUIOpenOrLoading(EUIWindowType.Setting))
+                {
+                    ModEntry.Log("[诊断] F7：设置窗口加载中，等待就绪");
+                    return true; // 加载中：Tick 轮询完成后自动跳页
+                }
+                ModEntry.Log("[诊断] F7：拉起游戏设置窗口");
+                HideBattleHud(ui);
                 ui.ShowUI(EUIWindowType.Setting);
                 pendingSwitch = true;
                 pendingSwitchUntil = Time.unscaledTime + 8f;
@@ -112,12 +142,6 @@ namespace BioChem
                 ModEntry.Log("[状态] 拉起游戏设置窗口失败：" + e.Message);
                 return false;
             }
-        }
-
-        private static void SwitchToOurs(UISettingView view)
-        {
-            if (!Embedded || View != view) return;
-            try { view.SwitchTab(PageIndex); } catch (Exception e) { ModEntry.Log("[状态] 跳到生化页失败：" + e.Message); }
         }
 
         // ===== 嵌入 =====
@@ -142,13 +166,43 @@ namespace BioChem
             catch { return false; }
         }
 
+        // F7 直接拉设置窗口时，对战 HUD（物品栏/技能条）会从半透明底里透出来；
+        // 按游戏自己的 temp 关闭方式临时收起，设置关掉后再恢复（ESC 菜单路径有菜单背景遮挡，不动）
+        private static UIWindow hiddenHud;
+        private static void HideBattleHud(UIManager ui)
+        {
+            if (hidBattleHud || ui == null) return;
+            try
+            {
+                if (ui.IsUIOpen(EUIWindowType.Menu)) return;
+                hiddenHud = ui.GetOpenUI(EUIWindowType.BattleMain);
+                if (hiddenHud == null) return;
+                ui.CloseUI(EUIWindowType.BattleMain, true);
+                hidBattleHud = true;
+            }
+            catch { }
+        }
+
+        private static void RestoreBattleHud()
+        {
+            if (!hidBattleHud) return;
+            hidBattleHud = false;
+            UIWindow hud = hiddenHud;
+            hiddenHud = null;
+            if (hud == null || hud.gameObject == null) return; // 场景已切走：别在别的场景把 HUD 拉起来
+            try { SingletonT<UIManager>.Instance?.ShowUI(EUIWindowType.BattleMain); } catch { }
+        }
+
         private static UISettingView FindSceneView()
         {
+            UISettingView idle = null;
             foreach (UIWindow w in Resources.FindObjectsOfTypeAll<UIWindow>())
             {
-                if (w is UISettingView && w.gameObject.scene.IsValid()) return (UISettingView)w;
+                if (!(w is UISettingView) || !w.gameObject.scene.IsValid()) continue;
+                if (w.gameObject.activeInHierarchy) return (UISettingView)w; // 正开着的窗口优先
+                if (idle == null) idle = (UISettingView)w;                    // 窗口池里的实例兜底
             }
-            return null;
+            return idle;
         }
 
         private static void Embed(UISettingView view)
@@ -169,20 +223,18 @@ namespace BioChem
             UI_SettingTab lastTab = tabs[tabs.Count - 1];
             int newIndex = panels.Count;
 
-            // 1) 页签：克隆最后一枚，位置沿相邻页签的间距外推；按钮拆掉重建接我们的下标
+            // 1) 页签：克隆最后一枚，按钮拆掉重建接我们的下标
             GameObject tabGo = UnityEngine.Object.Instantiate(lastTab.gameObject, lastTab.transform.parent);
             tabGo.name = "页签_生化模式";
+            // 最后一枚是官方的「模组设置」页签：没有 ModSettings 注册时游戏会把它隐藏（inactive），
+            // 而 SwitchTab 遇到 inactive 页签直接 return —— 不激活的话切页永远静默失败
+            tabGo.SetActive(true);
             RectTransform tabRt = (RectTransform)tabGo.transform;
             RectTransform lastRt = (RectTransform)lastTab.transform;
-            if (tabs.Count >= 2)
-            {
-                RectTransform prevRt = (RectTransform)tabs[tabs.Count - 2].transform;
-                tabRt.anchoredPosition = lastRt.anchoredPosition + (lastRt.anchoredPosition - prevRt.anchoredPosition);
-            }
-            else
-            {
-                tabRt.anchoredPosition = lastRt.anchoredPosition + new Vector2(lastRt.rect.width + 8f, 0f);
-            }
+            // 兜底位置：沿用相邻页签间距外推（LayoutTabs 能对齐时会整体重排覆盖）
+            tabRt.anchoredPosition = tabs.Count >= 2
+                ? lastRt.anchoredPosition + (lastRt.anchoredPosition - ((RectTransform)tabs[tabs.Count - 2].transform).anchoredPosition)
+                : lastRt.anchoredPosition + new Vector2(lastRt.rect.width + 8f, 0f);
             tabRt.localScale = Vector3.one;
             foreach (MonoBehaviour mb in tabGo.GetComponentsInChildren<MonoBehaviour>(true))
             {
@@ -190,6 +242,13 @@ namespace BioChem
                 if (mb is Button) continue;             // 稍后重建
                 string ns = mb.GetType().Namespace;
                 if (ns == null || !ns.StartsWith("UnityEngine")) UnityEngine.Object.Destroy(mb);
+            }
+            // 克隆的是官方的「模组设置」页签，文字走本地化键（UI_ModSettings_Tab）。不清键的话
+            // OnEnable/SetText 会把它刷回「模组设置」，玩家看到两个同名页签，自然以为没加成功
+            foreach (Text t in tabGo.GetComponentsInChildren<Text>(true))
+            {
+                if (t is TextEx te) te.SetKey(null);
+                t.text = "生化模式";
             }
             Button oldBtn = tabGo.GetComponent<Button>();
             if (oldBtn != null) UnityEngine.Object.DestroyImmediate(oldBtn); // 持久监听（原下标）随组件一起没
@@ -211,15 +270,121 @@ namespace BioChem
             float w = Mathf.Abs(src.rect.width);
             float h = Mathf.Abs(src.rect.height);
             BioChemPanel.BuildEmbeddedPage(panelGo.transform, w, h);
+            // 设置窗口是 ScreenSpaceCamera 画布，UI 全在 Layer 5；运行时 new 的对象默认 Layer 0，
+            // 会被 UI 相机按 cullingMask 裁掉——整页内容"看不见"就是它
+            SetLayerRecursive(panelGo, samplePanel.gameObject.layer);
+            SetLayerRecursive(tabGo, lastTab.gameObject.layer);
 
             // 3) 追加进列表并保持当前页不变
-            tabs.Add(tabGo.GetComponent<UI_SettingTab>());
+            UI_SettingTab ourTab = tabGo.GetComponent<UI_SettingTab>();
+            tabs.Add(ourTab);
             panels.Add(panel);
             panel.SetVisible(false); // 当前页保持不变，玩家点到我们页签时 SwitchTab 会点亮并调 SetInfo
+            LayoutTabs(tabs);
             View = view;
             PageIndex = panels.Count - 1;
-            embeddedIds.Add(view.GetInstanceID());
+            try { ourTab.SetState(false); } catch { } // 页签可视件（选中/未选中图）先摆成未选中态
             ModEntry.Log("[状态] 「生化模式」已挂进游戏设置窗口（第 " + (PageIndex + 1) + " 页，共 " + panels.Count + " 页）");
+            ModEntry.Log("[诊断] 新页签：父=" + (tabGo.transform.parent != null ? tabGo.transform.parent.name : "null")
+                + " 位置=" + tabRt.anchoredPosition + " 尺寸=" + tabRt.sizeDelta
+                + " 页签数=" + tabs.Count + " 面板数=" + panels.Count
+                + " 窗口活动=" + view.gameObject.activeInHierarchy + " 缩放=" + view.transform.localScale);
+        }
+
+        // 诊断：输出设置窗口里生化页签/面板的真实可见状态，定位“看不到页签”的现场
+        private static void LogTabState(UISettingView view, string phase, bool dumpAll = false)
+        {
+            try
+            {
+                if (!Embedded) { ModEntry.Log("[诊断] " + phase + "：尚未嵌入"); return; }
+                UI_SettingTab tab = PageIndex < view.tabList.Count ? view.tabList[PageIndex] : null;
+                UI_SettingPanel panel = PageIndex < view.panelList.Count ? view.panelList[PageIndex] : null;
+                var tabRt = tab != null ? (RectTransform)tab.transform : null;
+                string texts = "";
+                if (tab != null)
+                    foreach (Text t in tab.GetComponentsInChildren<Text>(true))
+                        texts += "[" + (t.gameObject.activeInHierarchy ? "显示" : "隐藏") + ":" + t.text + "]";
+                ModEntry.Log("[诊断] " + phase + "：窗口活动=" + view.gameObject.activeInHierarchy
+                    + " 页签=" + (tab != null ? (tab.gameObject.activeSelf + "/" + tab.gameObject.activeInHierarchy) : "null")
+                    + (tabRt != null ? (" 位置=" + tabRt.anchoredPosition + " 尺寸=" + tabRt.sizeDelta + " 世界=" + tabRt.position) : "")
+                    + " 面板活动=" + (panel != null && panel.gameObject.activeInHierarchy)
+                    + " 文字=" + texts);
+                if (dumpAll)
+                {
+                    string all = "";
+                    for (int i = 0; i < view.tabList.Count; i++)
+                    {
+                        UI_SettingTab t = view.tabList[i];
+                        if (t == null) { all += i + ":null; "; continue; }
+                        var r = (RectTransform)t.transform;
+                        all += i + ":" + t.name + "@" + r.anchoredPosition + (t.gameObject.activeInHierarchy ? "o" : "x") + " ";
+                    }
+                    ModEntry.Log("[诊断] " + phase + "：全部页签（" + view.tabList.Count + "）=" + all);
+                }
+            }
+            catch (Exception e) { ModEntry.Log("[诊断] 状态输出失败：" + e.Message); }
+        }
+
+        // 页签排布：只排「可见」页签——没有 ModSettings 注册时官方会把最后一枚页签隐藏（inactive），
+        // 全量排会留下空槽。优先保持原生尺寸/间距；放不下时等比收窄并避开右上角关闭按钮
+        private static void LayoutTabs(List<UI_SettingTab> tabs)
+        {
+            var vis = new List<UI_SettingTab>();
+            foreach (UI_SettingTab t in tabs)
+                if (t != null && t.gameObject.activeSelf) vis.Add(t);
+            if (vis.Count < 2) return;
+
+            Transform parent = vis[0].transform.parent;
+            float y = vis[0].transform.GetComponent<RectTransform>().anchoredPosition.y;
+            float left = float.MaxValue, nativeW = 0f, firstX = 0f, lastX = 0f;
+            int originals = vis.Count - 1; // 最后一枚是我们克隆的
+            for (int i = 0; i < originals; i++)
+            {
+                RectTransform rt = (RectTransform)vis[i].transform;
+                // 布局与预期不符（不同容器/不同行）就保持原样，不硬挪
+                if (rt.parent != parent || Mathf.Abs(rt.anchoredPosition.y - y) > 1f) return;
+                if (i == 0) { firstX = rt.anchoredPosition.x; nativeW = Mathf.Abs(rt.rect.width); }
+                lastX = rt.anchoredPosition.x;
+                left = Mathf.Min(left, rt.anchoredPosition.x - Mathf.Abs(rt.rect.width) * 0.5f);
+            }
+            float step = originals > 1 ? (lastX - firstX) / (originals - 1) : nativeW + 8f;
+            float gap = Mathf.Max(4f, step - nativeW);
+
+            float limit = CloseButtonLeft(parent);
+            float width = nativeW;
+            float need = vis.Count * nativeW + (vis.Count - 1) * gap;
+            float available = limit - left;
+            if (need > available) width = Mathf.Max(90f, (available - (vis.Count - 1) * gap) / vis.Count);
+
+            for (int i = 0; i < vis.Count; i++)
+            {
+                RectTransform rt = (RectTransform)vis[i].transform;
+                rt.sizeDelta = new Vector2(width, rt.sizeDelta.y);
+                rt.anchoredPosition = new Vector2(left + width * 0.5f + i * (width + gap), rt.anchoredPosition.y);
+                Image sel = vis[i].selected, unsel = vis[i].unselected;
+                if (sel != null) sel.rectTransform.sizeDelta = new Vector2(Mathf.Max(60f, width - 10f), sel.rectTransform.sizeDelta.y);
+                if (unsel != null) unsel.rectTransform.sizeDelta = new Vector2(Mathf.Max(60f, width - 10f), unsel.rectTransform.sizeDelta.y);
+            }
+        }
+
+        // 页签右侧可用边界：右上角关闭按钮的左缘（找不到就用画布右缘留白）
+        private static float CloseButtonLeft(Transform tabParent)
+        {
+            if (tabParent != null)
+                foreach (Transform child in tabParent)
+                    if (child.name == "CloseBtn")
+                    {
+                        RectTransform rt = (RectTransform)child;
+                        return rt.anchoredPosition.x - Mathf.Abs(rt.rect.width) * 0.5f - 6f;
+                    }
+            return 900f;
+        }
+
+        // 游戏 UI 相机只渲染 UI 层；运行时 new 出来的对象默认 Layer 0，必须整棵子树改成父面板的层
+        private static void SetLayerRecursive(GameObject go, int layer)
+        {
+            go.layer = layer;
+            foreach (Transform child in go.transform) SetLayerRecursive(child.gameObject, layer);
         }
     }
 
@@ -228,6 +393,7 @@ namespace BioChem
     {
         public override void SetInfo()
         {
+            ModEntry.Log("[诊断] 生化页 SetInfo 被调用，面板活动=" + gameObject.activeInHierarchy);
             BioChemPanel.RefreshPanelValues();
         }
     }

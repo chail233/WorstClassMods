@@ -139,6 +139,7 @@ namespace BioChem
         private const ulong VirtualShotUidBase = 0x6000000000000000UL; // 虚拟弹体 UID 高位标记（真实 UID 远小于此）
         private static readonly Dictionary<ulong, float> mgFireUntil = new Dictionary<ulong, float>(); // 服务端射击限频
         private static bool lastImpactWasRegistered; // 本发是否注册过 taserShots（postfix 只结算已注册的弹）
+        private static bool suppressVanillaStun;     // 本次原生 OnTaserImpact 结算期间屏蔽 TryStun
         private static readonly MethodInfo TaserTryBuildShotMethod =
             AccessTools.Method(typeof(TaserComponent), "TryBuildShot");
         private static readonly MethodInfo TaserPlayFireMethod =
@@ -181,6 +182,9 @@ namespace BioChem
                 harmony.Patch(AccessTools.Method(typeof(UnitMessageHandler), nameof(UnitMessageHandler.OnTaserImpact)),
                     prefix: new HarmonyMethod(typeof(ModEntry), "BeforeTaserImpact"),
                     postfix: new HarmonyMethod(typeof(ModEntry), "AfterTaserImpact"));
+                // 我们的吹箭没有原版眩晕：只在本次原生结算窗口里让 TryStun 返回 false（学生被打=完全无效）
+                harmony.Patch(AccessTools.Method(typeof(TaserProjectile), "TryStun"),
+                    prefix: new HarmonyMethod(typeof(ModEntry), "BeforeTaserTryStun"));
                 // 连发模式吞掉原生单击开火（否则一发就把嘴里的吹箭消耗掉），由 mod 连发循环接管；瞄准不受影响
                 harmony.Patch(AccessTools.Method(typeof(TaserComponent), "HandleInput"),
                     prefix: new HarmonyMethod(typeof(ModEntry), "BeforeTaserHandleInput"));
@@ -613,11 +617,28 @@ namespace BioChem
 
         // ===== 原生吹箭命中：生化结算 =====
 
+        // TaserProjectile.TryStun 是服务端/客机共用的眩晕入口；只在我们吹箭的原生结算窗口里拦
+        public static bool BeforeTaserTryStun(ref bool __result)
+        {
+            if (!suppressVanillaStun) return true;
+            __result = false;
+            return false;
+        }
+
+        // 连发吹箭的虚拟弹体 UID（高位 0b011）；真实 unit UID 远小于该段
+        private static bool IsModDartUid(ulong uid)
+        {
+            return (uid & 0xE000000000000000UL) == VirtualShotUidBase;
+        }
+
         // prefix：记录这一发是否注册过 taserShots（原生校验通过才会注册）。
         // postfix 结算以此为门槛——被原生拒绝的弹（过期/未注册/伪造）不再扣血扣减速
         public static void BeforeTaserImpact(UnitMessageHandler __instance, TaserImpact_C2S impact)
         {
             lastImpactWasRegistered = false;
+            // 我们模式的吹箭不再有原版眩晕：只在这一发原生结算期间让 TryStun 直接返回 false，
+            // 学生被打中=完全无效，老师/小老师走下面的扣血+减速
+            suppressVanillaStun = enabled && IsModDartUid(impact.itemUID);
             try
             {
                 object dict = TaserShotsField?.GetValue(__instance);
@@ -632,6 +653,7 @@ namespace BioChem
         // 眩晕已由原生 TryStun 处理（大老师被吹箭晕 = 与游戏内行为一致）
         private static void AfterTaserImpact(UnitMessageHandler __instance, TaserImpact_C2S impact)
         {
+            suppressVanillaStun = false;
             try
             {
                 if (!enabled || !NetRuntime.IsServer || !impact.collided) return;

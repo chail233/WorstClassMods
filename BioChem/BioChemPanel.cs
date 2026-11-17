@@ -25,6 +25,9 @@ namespace BioChem
         private static Sprite btnSprite;
         private static Font font;
         private static int baseFontSize = 24;
+        private static Color vanillaInk = new Color(0.12f, 0.11f, 0.10f, 1f); // 从设置窗口文字里抠出来的墨色
+        private static Color bodyInk = Color.white;                            // 当前面板正文色（换宿主时设置）
+        private static bool lightBg = true;                                    // 当前宿主是不是浅色底（决定数值强调色）
 
         internal static bool IsOpen => canvasGo != null && canvasGo.activeSelf;
 
@@ -141,9 +144,14 @@ namespace BioChem
                 foreach (Text t in window.GetComponentsInChildren<Text>(true))
                 {
                     if (t.font == null) continue;
-                    font = t.font;
-                    if (t.fontSize > 0) baseFontSize = Mathf.Clamp(t.fontSize, 18, 32);
-                    break;
+                    if (font == null)
+                    {
+                        font = t.font;
+                        if (t.fontSize > 0) baseFontSize = Mathf.Clamp(t.fontSize, 18, 32);
+                    }
+                    // 设置窗口是浅色底 + 黑字：取正文墨色，我们的内容才不会白字贴白底
+                    Color c = t.color;
+                    if (c.a > 0.5f && (c.r + c.g + c.b) * 0.333f < 0.4f) vanillaInk = c;
                 }
             }
 
@@ -202,9 +210,13 @@ namespace BioChem
             blockerBtn.transition = Selectable.Transition.None;
             blockerBtn.onClick.AddListener(Close);
 
-            RectTransform win;
+            RectTransform win = null;
             float winH;
-            if (bgNode != null && TryCloneWindowFrame(out win))
+            bool cloned = bgNode != null && TryCloneWindowFrame(out win);
+            // 克隆到的设置窗框是浅色底：正文改用原版墨色；自建深色底框才用白字
+            lightBg = cloned;
+            bodyInk = cloned ? vanillaInk : Color.white;
+            if (cloned)
             {
                 winH = Mathf.Max(600f, win.rect.height);
             }
@@ -215,7 +227,7 @@ namespace BioChem
                 Place(win, new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(640f, 660f), Vector2.zero);
                 winH = 660f;
 
-                Text title = NewText(win, "标题", "生化模式 · 管理面板", baseFontSize + 8, TextAnchor.MiddleCenter, Color.white);
+                Text title = NewText(win, "标题", "生化模式 · 管理面板", baseFontSize + 8, TextAnchor.MiddleCenter, bodyInk);
                 Place(title.rectTransform, new Vector2(0.5f, 1f), new Vector2(0.5f, 1f), new Vector2(592f, 52f), new Vector2(0f, -14f));
             }
 
@@ -223,7 +235,7 @@ namespace BioChem
             float bodyTopY = -210f;
             float bodyH = Mathf.Max(240f, winH - 210f - 62f);
 
-            statusText = NewText(win, "状态", "", baseFontSize, TextAnchor.UpperLeft, Color.white);
+            statusText = NewText(win, "状态", "", baseFontSize, TextAnchor.UpperLeft, bodyInk);
             Place(statusText.rectTransform, new Vector2(0.5f, 1f), new Vector2(0f, 1f), new Vector2(innerW, 56f), new Vector2(-innerW / 2f, -64f));
 
             hostToggle = NewButton(win, "开关", "", new Color(0.25f, 0.45f, 0.75f, 1f), new Vector2(400f, 44f), () =>
@@ -251,7 +263,7 @@ namespace BioChem
             var rulesGo = new GameObject("规则页", typeof(RectTransform));
             rulesGo.transform.SetParent(win, false);
             Place(rulesGo.GetComponent<RectTransform>(), new Vector2(0.5f, 1f), new Vector2(0.5f, 1f), new Vector2(innerW, bodyH), new Vector2(0f, bodyTopY));
-            rulesText = NewText(rulesGo.transform, "规则", "", baseFontSize - 2, TextAnchor.UpperLeft, Color.white);
+            rulesText = NewText(rulesGo.transform, "规则", "", baseFontSize - 2, TextAnchor.UpperLeft, bodyInk);
             Place(rulesText.rectTransform, new Vector2(0f, 1f), new Vector2(0f, 1f), new Vector2(innerW, bodyH), Vector2.zero);
             rulesText.verticalOverflow = VerticalWrapMode.Overflow;
             rulesPage = rulesGo;
@@ -260,7 +272,7 @@ namespace BioChem
             Image closeImg = NewImage(win, "关闭", btnSprite, new Color(0.5f, 0.25f, 0.25f, 1f));
             Place(closeImg.rectTransform, new Vector2(0.5f, 0f), new Vector2(1f, 0f), new Vector2(150f, 52f), new Vector2(-24f, 18f));
             Button closeBtn = closeImg.gameObject.AddComponent<Button>();
-            Text closeLabel = NewText(closeImg.transform, "文字", "关闭", baseFontSize, TextAnchor.MiddleCenter, Color.white);
+            Text closeLabel = NewText(closeImg.transform, "文字", "关闭", baseFontSize, TextAnchor.MiddleCenter, bodyInk);
             Stretch(closeLabel.rectTransform);
             closeBtn.onClick.AddListener(Close);
         }
@@ -338,19 +350,21 @@ namespace BioChem
                 float y = -(row * rowH) - 4f;
                 Place(cell.GetComponent<RectTransform>(), new Vector2(0.5f, 1f), new Vector2(0f, 1f), new Vector2(cellW, rowH - 6f), new Vector2(x, y));
 
-                Text label = NewText(cell.transform, "标签", f.Label, labelSize, TextAnchor.MiddleLeft, Color.white);
-                Place(label.rectTransform, new Vector2(0f, 1f), new Vector2(0f, 1f), new Vector2(cellW - 100f, rowH - 6f), Vector2.zero);
+                Text label = NewText(cell.transform, "标签", f.Label, labelSize, TextAnchor.MiddleLeft, bodyInk);
+                Place(label.rectTransform, new Vector2(0f, 1f), new Vector2(0f, 1f), new Vector2(Mathf.Max(60f, cellW - 116f), rowH - 6f), Vector2.zero);
 
+                // 右侧一组：− [数值] +（留 4px 间隔，避免数值被加号压住）
                 f.MinusBtn = NewButton(cell.transform, "减", "−", new Color(0.45f, 0.3f, 0.2f, 1f), new Vector2(24f, rowH - 8f),
                     () => Adjust(f, -f.Step));
-                Place(f.MinusBtn.GetComponent<RectTransform>(), new Vector2(0f, 1f), new Vector2(0f, 1f), new Vector2(24f, rowH - 8f), new Vector2(cellW - 100f, 0f));
+                Place(f.MinusBtn.GetComponent<RectTransform>(), new Vector2(0f, 1f), new Vector2(0f, 1f), new Vector2(24f, rowH - 8f), new Vector2(cellW - 108f, 0f));
 
-                f.ValueText = NewText(cell.transform, "值", "", labelSize, TextAnchor.MiddleCenter, new Color(1f, 0.92f, 0.6f, 1f));
-                Place(f.ValueText.rectTransform, new Vector2(0f, 1f), new Vector2(0f, 1f), new Vector2(44f, rowH - 6f), new Vector2(cellW - 76f, 0f));
+                f.ValueText = NewText(cell.transform, "值", "", labelSize, TextAnchor.MiddleCenter,
+                    lightBg ? new Color(0.55f, 0.36f, 0.05f, 1f) : new Color(1f, 0.92f, 0.6f, 1f));
+                Place(f.ValueText.rectTransform, new Vector2(0f, 1f), new Vector2(0f, 1f), new Vector2(48f, rowH - 6f), new Vector2(cellW - 80f, 0f));
 
                 f.PlusBtn = NewButton(cell.transform, "加", "+", new Color(0.25f, 0.42f, 0.28f, 1f), new Vector2(24f, rowH - 8f),
                     () => Adjust(f, f.Step));
-                Place(f.PlusBtn.GetComponent<RectTransform>(), new Vector2(0f, 1f), new Vector2(0f, 1f), new Vector2(24f, rowH - 8f), new Vector2(cellW - 52f, 0f));
+                Place(f.PlusBtn.GetComponent<RectTransform>(), new Vector2(0f, 1f), new Vector2(0f, 1f), new Vector2(24f, rowH - 8f), new Vector2(cellW - 28f, 0f));
             }
             return 9f * rowH;
         }
@@ -373,7 +387,7 @@ namespace BioChem
                 "· 小老师：学生功能禁用（看不到其他玩家 ID）、捣蛋不计分；HP " + c.miniMaxHp + "，写板书长按读条缓慢回体力，走路每秒耗 " + c.staminaDrainPerSecond.ToString("0.#") + " 体力\n" +
                 "· 小老师按 F 击晕身边学生 " + c.miniStunSeconds.ToString("0.#") + " 秒：耗体力 " + c.staminaCostPerStun.ToString("0.#") + "、冷却 " + c.miniStunCooldownSeconds.ToString("0.#") + " 秒、距离 " + c.miniStunRange.ToString("0.#") + " 米，体力不足无法击晕\n" +
                 "· 大老师 HP " + c.teacherMaxHp + "，写板书回复 " + c.teacherHpPerWrite + " HP；HP 归零晕倒 " + c.downSeconds.ToString("0") + " 秒后从办公室复活并刷新状态\n" +
-                "· 学生按 1 掏出/收起连发吹箭筒（嘴部叼持，右键瞄准）：按住左键每 " + c.fireInterval.ToString("0.#") + " 秒射一支，命中老师 -" + c.dartDamage + " HP、每层减速 " + (c.dartSlowPerStack * 100f).ToString("0") + "%（持续 " + c.dartSlowSeconds.ToString("0.#") + " 秒，最多 " + c.dartSlowMaxStacks + " 层），眩晕与游戏内吹箭一致\n" +
+                "· 学生按 1 掏出/收起连发吹箭筒（嘴部叼持，右键瞄准）：按住左键每 " + c.fireInterval.ToString("0.#") + " 秒射一支，命中老师/小老师 -" + c.dartDamage + " HP、每层减速 " + (c.dartSlowPerStack * 100f).ToString("0") + "%（持续 " + c.dartSlowSeconds.ToString("0.#") + " 秒，最多 " + c.dartSlowMaxStacks + " 层）；无眩晕，打中学生无效\n" +
                 "· 获胜机制与原版一致；数值改动（房主）即时同步全员\n" +
                 "· 房主本机数值持久化在 LocalLow Configs/biochem/biochem.json";
         }
@@ -511,22 +525,35 @@ namespace BioChem
         internal static void BuildEmbeddedPage(Transform parent, float w, float h)
         {
             LocateAssets(); // 玩家可能没按过 F7：字体/按钮图首次在这里缓存
+            lightBg = true;               // 嵌入的是原版设置窗（浅色底）
+            bodyInk = vanillaInk;
+            ModEntry.Log("[诊断] 嵌入页样式：字体=" + (font != null ? font.name : "null")
+                + " 墨色=" + bodyInk + " 字号=" + baseFontSize);
             float pad = 24f;
             float innerW = Mathf.Max(320f, w - pad * 2f);
-            statusText = NewText(parent, "状态", "", baseFontSize - 2, TextAnchor.UpperLeft, Color.white);
-            Place(statusText.rectTransform, new Vector2(0f, 1f), new Vector2(0f, 1f), new Vector2(innerW, 44f), new Vector2(pad, -2f));
+            statusText = NewText(parent, "状态", "", baseFontSize - 2, TextAnchor.UpperLeft, bodyInk);
+            Place(statusText.rectTransform, new Vector2(0f, 1f), new Vector2(0f, 1f), new Vector2(innerW, 52f), new Vector2(pad, -2f));
 
-            hostToggle = NewButton(parent, "开关", "", new Color(0.25f, 0.45f, 0.75f, 1f), new Vector2(Mathf.Min(420f, innerW), 40f),
+            hostToggle = NewButton(parent, "开关", "", new Color(0.25f, 0.45f, 0.75f, 1f), new Vector2(innerW, 38f),
                 () => { if (NetRuntime.IsServer) ModEntry.SetEnabled(!ModEntry.enabled); });
-            Place(hostToggle.GetComponent<RectTransform>(), new Vector2(0f, 1f), new Vector2(0.5f, 1f),
-                new Vector2(Mathf.Min(420f, innerW), 40f), new Vector2(w / 2f, -50f));
+            Place(hostToggle.GetComponent<RectTransform>(), new Vector2(0f, 1f), new Vector2(0f, 1f),
+                new Vector2(innerW, 38f), new Vector2(pad, -58f));
             hostToggleLabel = hostToggle.GetComponentInChildren<Text>();
+            hostToggleLabel.fontSize = Mathf.Max(16, baseFontSize - 4); // 状态文案较长，缩一号铺满整行
 
-            float rulesH = Mathf.Max(90f, h * 0.25f);
-            float gridH = BuildGrid(parent, innerW, Mathf.Max(270f, h - 96f - rulesH - 8f));
-            rulesText = NewText(parent, "规则", "", baseFontSize - 3, TextAnchor.UpperLeft, Color.white);
+            // 网格必须有独立容器：BuildGrid 从容器顶部往下排，直接挂面板根会压住状态行和开关
+            float gridTop = 108f;
+            float rulesH = Mathf.Max(150f, h * 0.28f);
+            float gridH = Mathf.Max(240f, h - gridTop - 8f - rulesH);
+            var gridGo = new GameObject("数值网格", typeof(RectTransform));
+            gridGo.transform.SetParent(parent, false);
+            Place(gridGo.GetComponent<RectTransform>(), new Vector2(0f, 1f), new Vector2(0f, 1f),
+                new Vector2(innerW, gridH), new Vector2(pad, -gridTop));
+            float usedH = BuildGrid(gridGo.transform, innerW, gridH);
+
+            rulesText = NewText(parent, "规则", "", baseFontSize - 4, TextAnchor.UpperLeft, bodyInk);
             Place(rulesText.rectTransform, new Vector2(0f, 1f), new Vector2(0f, 1f),
-                new Vector2(innerW, Mathf.Max(80f, h - 96f - gridH - 10f)), new Vector2(pad, -96f - gridH - 6f));
+                new Vector2(innerW, Mathf.Max(100f, h - gridTop - usedH - 12f)), new Vector2(pad, -gridTop - usedH - 8f));
             rulesText.verticalOverflow = VerticalWrapMode.Overflow;
         }
 
@@ -539,7 +566,7 @@ namespace BioChem
             Place(img.rectTransform, new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), size, Vector2.zero);
             Button btn = img.gameObject.AddComponent<Button>();
             btn.transition = Selectable.Transition.ColorTint;
-            Text t = NewText(img.transform, "文字", label, Mathf.Max(16, baseFontSize - 2), TextAnchor.MiddleCenter, Color.white);
+            Text t = NewText(img.transform, "文字", label, Mathf.Max(16, baseFontSize - 2), TextAnchor.MiddleCenter, bodyInk);
             Stretch(t.rectTransform);
             if (onClick != null) btn.onClick.AddListener(() => onClick());
             return btn;
