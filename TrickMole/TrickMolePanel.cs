@@ -5,19 +5,16 @@ using UnityEngine.UI;
 
 namespace TrickMole
 {
-    // 角色配置面板：UGUI 复用游戏设置窗口（UISettingView）的素材——背景框 / 按钮图 / 字体，
-    // 关闭过的窗口实例留在窗口池里（SetActive(false) + 回池），运行时随时可从中抽取引用。
-    // 自建面板是嵌入游戏设置页失败时的兜底；页内容构建件（角色选择/步进器/开关）自建与嵌入两路共用。
-    // 数值编辑仅课程外开放（Prepare/Classing 锁定，改动下节课生效）；每台机器编辑各自的配置，联机以房主配置为准。
+    // 角色配置页内容：挂在游戏设置窗口（UISettingView）的「课堂角色」页里（TrickMoleGameSettings 负责嵌入）。
+    // 素材（窗框图/按钮图/字体/墨色）从窗口池里的设置窗口实例抽取；数值编辑仅课程外开放
+    // （Prepare/Classing 锁定，改动下节课生效）；每台机器编辑各自的配置，联机以房主配置为准。
     internal static class TrickMolePanel
     {
-        private static GameObject canvasGo;
         private static Button selectorPrev, selectorNext;
         private static Text selectorLabel;
         private static Button addBtn, removeBtn, resetBtn;
         private static InputField nameInput;
         private static Text noteText;
-        private static bool uiRuleActive;
 
         private static Sprite bgSprite;
         private static GameObject bgNode;
@@ -27,75 +24,6 @@ namespace TrickMole
         private static Color vanillaInk = new Color(0.12f, 0.11f, 0.10f, 1f); // 从设置窗口文字里抠出来的墨色
         private static Color bodyInk = Color.white;                            // 当前面板正文色（换宿主时设置）
         private static bool lightBg = true;                                    // 当前宿主是不是浅色底（决定数值强调色）
-
-        internal static bool IsOpen => canvasGo != null && canvasGo.activeSelf;
-
-        // ===== 面板开合 =====
-
-        internal static void Toggle()
-        {
-            if (IsOpen) Close();
-            else Open();
-        }
-
-        internal static void Open()
-        {
-            LocateAssets();
-            if (canvasGo == null) Build();
-            RefreshPanelValues();
-            canvasGo.SetActive(true);
-            SetUIInputRule(true);
-        }
-
-        internal static void Close()
-        {
-            if (canvasGo != null)
-            {
-                var es = UnityEngine.EventSystems.EventSystem.current;
-                if (es != null && es.currentSelectedGameObject != null
-                    && es.currentSelectedGameObject.transform.IsChildOf(canvasGo.transform))
-                    es.SetSelectedGameObject(null);
-                canvasGo.SetActive(false);
-            }
-            SetUIInputRule(false);
-        }
-
-        internal static void Teardown()
-        {
-            SetUIInputRule(false);
-            if (canvasGo != null) UnityEngine.Object.Destroy(canvasGo);
-            canvasGo = null;
-        }
-
-        // 嵌入页接管后丢弃自建面板：只藏不拆输入规则——游戏设置窗口自己开着 Rule_UISetting，
-        // 我们此时再发 false 会把它的规则关掉
-        internal static void HideForEmbedded()
-        {
-            if (canvasGo != null && canvasGo.activeSelf) canvasGo.SetActive(false);
-            uiRuleActive = false;
-        }
-
-        // 与 UISettingView.OnActive 同款：面板打开期间冻结玩家输入
-        private static void SetUIInputRule(bool on)
-        {
-            if (uiRuleActive == on) return;
-            try
-            {
-                if (MonoSingletonT<InputManager>.IsSingletonActive())
-                {
-                    MonoSingletonT<InputManager>.Instance.ChangeRuleSet(EInputRuleSets.RuleSet0, EInputRule.Rule_UISetting, on, false);
-                    uiRuleActive = on;
-                }
-            }
-            catch { /* 输入规则失败不影响面板本身 */ }
-        }
-
-        internal static void Refresh()
-        {
-            if (!IsOpen) return;
-            SetUIInputRule(true); // 主菜单打开时 InputManager 可能还没建好，补挂输入冻结
-            RefreshPanelValues();
-        }
 
         // ===== 编辑门槛：课程进行中锁定（角色分配在上课瞬间定型，中途改配置容易误解）=====
 
@@ -194,138 +122,7 @@ namespace TrickMole
             return settingScene ?? anyScene ?? settingPrefab;
         }
 
-        // ===== 自建面板构建 =====
-
-        private static void Build()
-        {
-            canvasGo = new GameObject("课堂角色配置面板", typeof(Canvas), typeof(CanvasScaler), typeof(GraphicRaycaster));
-            UnityEngine.Object.DontDestroyOnLoad(canvasGo);
-            Canvas canvas = canvasGo.GetComponent<Canvas>();
-            canvas.renderMode = RenderMode.ScreenSpaceOverlay;
-            canvas.sortingOrder = 500; // 与游戏 Menu 层同级，压在 HUD 上
-            CanvasScaler scaler = canvasGo.GetComponent<CanvasScaler>();
-            scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
-            scaler.referenceResolution = new Vector2(1920f, 1080f);
-            scaler.screenMatchMode = CanvasScaler.ScreenMatchMode.MatchWidthOrHeight;
-            scaler.matchWidthOrHeight = 0.5f;
-
-            Image blocker = NewImage(canvasGo.transform, "遮罩", null, new Color(0f, 0f, 0f, 0.55f));
-            blocker.rectTransform.anchorMin = Vector2.zero;
-            blocker.rectTransform.anchorMax = Vector2.one;
-            blocker.rectTransform.offsetMin = Vector2.zero;
-            blocker.rectTransform.offsetMax = Vector2.zero;
-            Button blockerBtn = blocker.gameObject.AddComponent<Button>();
-            blockerBtn.transition = Selectable.Transition.None;
-            blockerBtn.onClick.AddListener(Close);
-
-            RectTransform win = null;
-            float winH;
-            bool cloned = bgNode != null && TryCloneWindowFrame(out win);
-            lightBg = cloned;
-            bodyInk = cloned ? vanillaInk : Color.white;
-            if (cloned)
-            {
-                winH = Mathf.Max(600f, win.rect.height);
-            }
-            else
-            {
-                Image winImg = NewImage(canvasGo.transform, "窗口", bgSprite, new Color(0.12f, 0.14f, 0.18f, 0.96f));
-                win = winImg.rectTransform;
-                Place(win, new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), new Vector2(760f, 700f), Vector2.zero);
-                winH = 700f;
-
-                Text title = NewText(win, "标题", "课堂角色 · 角色配置", baseFontSize + 8, TextAnchor.MiddleCenter, bodyInk);
-                Place(title.rectTransform, new Vector2(0.5f, 1f), new Vector2(0.5f, 1f), new Vector2(700f, 52f), new Vector2(0f, -14f));
-            }
-
-            float innerW = Mathf.Abs(win.rect.width) - 96f;
-            float bodyH = Mathf.Max(320f, winH - 190f - 62f);
-
-            var pageGo = new GameObject("角色配置页", typeof(RectTransform));
-            pageGo.transform.SetParent(win, false);
-            Place(pageGo.GetComponent<RectTransform>(), new Vector2(0.5f, 1f), new Vector2(0.5f, 1f),
-                new Vector2(innerW, bodyH), new Vector2(0f, -170f));
-            BuildPage(pageGo.transform, innerW, bodyH);
-
-            Image closeImg = NewImage(win, "关闭", btnSprite, new Color(0.5f, 0.25f, 0.25f, 1f));
-            Place(closeImg.rectTransform, new Vector2(0.5f, 0f), new Vector2(1f, 0f), new Vector2(150f, 52f), new Vector2(-24f, 18f));
-            Button closeBtn = closeImg.gameObject.AddComponent<Button>();
-            Text closeLabel = NewText(closeImg.transform, "文字", "关闭", baseFontSize, TextAnchor.MiddleCenter, bodyInk);
-            Stretch(closeLabel.rectTransform);
-            closeBtn.onClick.AddListener(Close);
-        }
-
-        // 克隆设置窗口的窗框节点：剥掉游戏逻辑脚本只留引擎视觉件（照搬生化模式面板的坑位处理）
-        private static bool TryCloneWindowFrame(out RectTransform win)
-        {
-            GameObject clone = null;
-            try
-            {
-                clone = UnityEngine.Object.Instantiate(bgNode, canvasGo.transform, false);
-                clone.name = "窗口(复用设置界面)";
-                foreach (Animator a in clone.GetComponentsInChildren<Animator>(true))
-                    UnityEngine.Object.Destroy(a);
-                foreach (MonoBehaviour mb in clone.GetComponentsInChildren<MonoBehaviour>(true))
-                {
-                    string ns = mb.GetType().Namespace;
-                    if (ns != null && ns.StartsWith("UnityEngine")) continue;
-                    UnityEngine.Object.Destroy(mb);
-                }
-                foreach (Behaviour b in clone.GetComponentsInChildren<Behaviour>(true))
-                {
-                    if (b is LayoutGroup || b is LayoutElement || b is ContentSizeFitter || b is AspectRatioFitter
-                        || b is Slider || b is Toggle || b is Dropdown || b is Scrollbar || b is ScrollRect
-                        || b is InputField)
-                        UnityEngine.Object.Destroy(b);
-                }
-                foreach (Button b in clone.GetComponentsInChildren<Button>(true))
-                {
-                    // RemoveAllListeners 清不掉序列化的持久监听（目标 UISettingView 已被剥掉，点了报错）；
-                    // 拆掉重建一个干净的 Button（Destroy 同帧生效不了，必须 DestroyImmediate 才能 AddComponent 同类型）
-                    GameObject buttonGo = b.gameObject;
-                    Graphic targetGraphic = b.targetGraphic;
-                    string n = buttonGo.name.ToLowerInvariant();
-                    bool isClose = n.Contains("close") || n.Contains("guanbi") || n.Contains("cha");
-                    UnityEngine.Object.DestroyImmediate(b);
-                    Button fresh = buttonGo.AddComponent<Button>();
-                    fresh.targetGraphic = targetGraphic;
-                    fresh.transition = Selectable.Transition.ColorTint;
-                    if (isClose) fresh.onClick.AddListener(Close);
-                    else buttonGo.SetActive(false);
-                }
-                bool titleDone = false;
-                foreach (Text t in clone.GetComponentsInChildren<Text>(true))
-                {
-                    t.raycastTarget = false;
-                    if (!titleDone && t.text.Contains("设置"))
-                    {
-                        t.text = "课堂角色 · 角色配置";
-                        titleDone = true;
-                    }
-                }
-                RectTransform rt = (RectTransform)clone.transform;
-                rt.localScale = Vector3.one;
-                Place(rt, new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f),
-                    new Vector2(Mathf.Abs(rt.rect.width), Mathf.Abs(rt.rect.height)), Vector2.zero);
-                if (!titleDone)
-                {
-                    Text title = NewText(rt, "标题", "课堂角色 · 角色配置", baseFontSize + 8, TextAnchor.MiddleCenter, Color.white);
-                    Place(title.rectTransform, new Vector2(0.5f, 1f), new Vector2(0.5f, 1f),
-                        new Vector2(Mathf.Abs(rt.rect.width) - 48f, 52f), new Vector2(0f, -26f));
-                }
-                win = rt;
-                return true;
-            }
-            catch (Exception e)
-            {
-                if (clone != null) UnityEngine.Object.Destroy(clone);
-                ModEntry.Log("[状态] 复用设置窗口窗框失败，回退自建底框：" + e.Message);
-                win = null;
-                return false;
-            }
-        }
-
-        // ===== 页内容（自建面板与游戏设置窗口嵌入页共用）=====
+        // ===== 页内容（挂在游戏设置窗口的「课堂角色」面板上）=====
 
         private static int selIndex;
 
@@ -385,7 +182,7 @@ namespace TrickMole
         private static Button toggleBroadcast, togglePush;
         private static Text toggleBroadcastLabel, togglePushLabel;
 
-        // 自建面板与嵌入页共用的整页构建：角色选择行 + 名称行 + 步进器网格（9 行两列）+ 提示行
+        // 整页构建：角色选择行 + 名称行 + 步进器网格（9 行两列）+ 提示行
         private static void BuildPage(Transform parent, float w, float h)
         {
             float pad = 8f;
@@ -554,7 +351,7 @@ namespace TrickMole
             RefreshPanelValues();
         }
 
-        // 自建面板页与游戏设置窗口嵌入页共用的刷新。
+        // 面板数值/开关/提示刷新。
         // Unity 的 Text.text 同值写入不会触发重排，每帧调用无害
         internal static void RefreshPanelValues()
         {
@@ -606,7 +403,7 @@ namespace TrickMole
 
         internal static void BuildEmbeddedPage(Transform parent, float w, float h)
         {
-            LocateAssets(); // 玩家可能没按过 F6：字体/按钮图首次在这里缓存
+            LocateAssets(); // 首次嵌入时缓存字体/按钮图/墨色
             lightBg = true;               // 嵌入的是原版设置窗（浅色底）
             bodyInk = vanillaInk;
             float pad = 16f;

@@ -61,7 +61,6 @@ namespace TrickMole
 
         internal static readonly KeyCode MusicKey = KeyCode.B;
         internal static readonly KeyCode PushKey = KeyCode.E;
-        internal const KeyCode PanelKey = KeyCode.F6;              // 角色配置面板（避开设生化模式的 F7）
         internal static readonly AudioEvents[] MusicPool = { AudioEvents.bgm_YuAi, AudioEvents.bgm_Hajimi1, AudioEvents.bgm_Hajimi2, AudioEvents.bgm_YuAids };
         private const string HarmonyId = "worstclass.trickmole";
         private const int ClassStateChangedMsgId = 301;
@@ -256,7 +255,7 @@ namespace TrickMole
                 harmony.UnpatchAll(HarmonyId);
                 throw;
             }
-            Log("[状态] 课堂角色 Mod 已加载：" + RoleConfig.Roles.Count + " 种角色（" + string.Join("、", RoleConfig.Roles.ConvertAll(r => r.name)) + "）；按 F6 或在游戏设置-课堂角色页配置角色");
+            Log("[状态] 课堂角色 Mod 已加载：" + RoleConfig.Roles.Count + " 种角色（" + string.Join("、", RoleConfig.Roles.ConvertAll(r => r.name)) + "）；在游戏设置-课堂角色页配置角色");
         }
 
         // ===== 计分加成与捣蛋累计（per-角色倍数） =====
@@ -1263,7 +1262,6 @@ namespace TrickMole
             TickImmunity(Time.unscaledDeltaTime);
             MuteLowLevelChannels(musicPlaying);
             TickMusicPlayback();
-            HandlePanelKey();
             HandleMusicKey();
             HandlePushKey();
         }
@@ -1274,26 +1272,6 @@ namespace TrickMole
             if (!ClassroomManager.IsSingletonActive()) return false;
             var state = ClassroomManager.Instance.curState;
             return state == EClassroomState.Prepare || state == EClassroomState.Classing;
-        }
-
-        // F6 面板键：主菜单里 InputManager 可能还没创建，单独放行不跟游戏内按键共用门槛
-        private static void HandlePanelKey()
-        {
-            if (!MonoSingletonT<InputManager>.IsSingletonActive() || !ReInput.isReady) return;
-            Keyboard keyboard = ReInput.players.GetPlayer(0).controllers.Keyboard;
-            if (keyboard != null && keyboard.GetKeyDown(PanelKey)) TogglePanel();
-        }
-
-        // F6 有 Rewired 与 IMGUI 两条通道，同一帧可能都触发，节流防双开关。
-        // 优先复用游戏设置窗口（打开并跳到「课堂角色」页），嵌不进去走自建面板
-        private static float lastPanelToggleAt;
-        internal static void TogglePanel()
-        {
-            if (Time.unscaledTime - lastPanelToggleAt < 0.25f) return;
-            lastPanelToggleAt = Time.unscaledTime;
-            if (TrickMoleGameSettings.TryOpen()) return;
-            TrickMolePanel.Toggle();
-            Log("[状态] 自建角色配置面板" + (TrickMolePanel.IsOpen ? "已打开" : "已关闭"));
         }
 
         // 本地玩家持有广播技能时，按 B 开关广播（房主直接本地处理）
@@ -1327,7 +1305,6 @@ namespace TrickMole
         {
             if (registeredStateHook) MsgCenter.UnRegister(ClassStateChangedMsgId);
             registeredStateHook = false;
-            TrickMolePanel.Teardown(); // 释放自建配置面板与输入冻结
         }
     }
 }

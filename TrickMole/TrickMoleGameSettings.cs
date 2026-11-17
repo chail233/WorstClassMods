@@ -5,18 +5,15 @@ using UnityEngine.UI;
 
 namespace TrickMole
 {
-    /// <summary>真嵌入游戏设置窗口：克隆 UISettingView 的页签、新建 UI_SettingPanel 子类页，
+    /// <summary>真嵌入游戏设置窗口：玩家手动打开游戏设置时，克隆 UISettingView 的页签、新建 UI_SettingPanel 子类页，
     /// 追加进 tabList/panelList——「课堂角色」成为游戏设置里的一页，与原版页签同款切换/导航。
-    /// 任何一步失败都走 TrickMolePanel 自建面板兜底。页内容复用 TrickMolePanel 的构建件。</summary>
+    /// 窗口实例可能被回收重建：每秒扫描，正开着的实例优先、窗口池里的闲置实例兜底。</summary>
     internal static class TrickMoleGameSettings
     {
         public static UISettingView View;      // 已嵌入的窗口实例
         public static int PageIndex = -1;      // 我们的页在 panelList 里的下标
-        private static bool pendingSwitch;     // ShowUI 异步开窗后轮询到实例再跳页
-        private static float pendingSwitchUntil;
         private static float scanAt;           // 场景实例扫描节流（FindObjectsOfTypeAll 很贵）
         private static int lastOpenLogId;      // 诊断：设置窗口打开状态变化时打一条
-        private static bool hidBattleHud;      // F6 直接开设置时临时收起的对战 HUD（ESC 菜单路径由菜单背景遮挡，不需要）
 
         public static bool Embedded => View != null && PageIndex >= 0;
 
@@ -24,41 +21,6 @@ namespace TrickMole
 
         public static void Tick()
         {
-            // ShowUI 异步加载：窗口实例就绪后补挂页并跳转
-            if (pendingSwitch)
-            {
-                if (Time.unscaledTime > pendingSwitchUntil)
-                {
-                    pendingSwitch = false;
-                    RestoreBattleHud();
-                    ModEntry.Log("[诊断] 等待设置窗口加载超时，回退自建面板");
-                    TrickMolePanel.Open();
-                }
-                else
-                {
-                    UISettingView view = GetOpenView();
-                    if (view != null)
-                    {
-                        pendingSwitch = false;
-                        if (!Embedded || View != view)
-                        {
-                            try { Embed(view); }
-                            catch (Exception e)
-                            {
-                                ModEntry.Log("[状态] 嵌入游戏设置窗口失败，改用自建面板：" + e.Message);
-                                return;
-                            }
-                        }
-                        if (Embedded && View == view)
-                        {
-                            TrickMolePanel.HideForEmbedded(); // 自建面板退场（不动输入规则，游戏设置窗口的规则还开着）
-                            try { view.SwitchTab(PageIndex); }
-                            catch (Exception e) { ModEntry.Log("[状态] 跳到课堂角色页失败：" + e.Message); }
-                        }
-                    }
-                }
-            }
-
             // 窗口实例可能被回收重建：优先跟随真正打开的那个实例挂页，池里闲置实例兜底
             if (Time.unscaledTime >= scanAt)
             {
@@ -78,62 +40,13 @@ namespace TrickMole
                 UISettingView target = open != null ? open : (Embedded ? null : FindSceneView());
                 if (target != null && (!Embedded || View != target))
                 {
-                    try
-                    {
-                        Embed(target);
-                        if (open != null) TrickMolePanel.HideForEmbedded(); // 玩家手动开的设置窗口挂上了页：自建面板退场
-                    }
-                    catch (Exception e) { ModEntry.Log("[状态] 嵌入游戏设置窗口失败（不影响自建面板）：" + e.Message); }
+                    try { Embed(target); }
+                    catch (Exception e) { ModEntry.Log("[状态] 嵌入游戏设置窗口失败：" + e.Message); }
                 }
             }
 
             // 设置窗口开着时保持数值/开关文案刷新
             if (Embedded && IsSettingOpen()) TrickMolePanel.RefreshPanelValues();
-        }
-
-        // ===== F6：打开游戏设置窗口并跳到课堂角色页；嵌不进去返回 false 走自建面板 =====
-
-        public static bool TryOpen()
-        {
-            try
-            {
-                var ui = SingletonT<UIManager>.Instance;
-                if (ui == null) return false;
-
-                UISettingView open = GetOpenView();
-                if (open != null)
-                {
-                    // 已开着：确保页挂上（失败返回 false 走自建面板），然后跳到我们页
-                    if (!Embedded || View != open)
-                    {
-                        try { Embed(open); }
-                        catch (Exception e)
-                        {
-                            ModEntry.Log("[状态] 嵌入游戏设置窗口失败，改用自建面板：" + e.Message);
-                            return false;
-                        }
-                    }
-                    if (!Embedded || View != open) return false;
-                    TrickMolePanel.HideForEmbedded();
-                    try { open.SwitchTab(PageIndex); }
-                    catch (Exception e) { ModEntry.Log("[状态] 跳到课堂角色页失败：" + e.Message); }
-                    return true;
-                }
-                if (ui.IsUIOpenOrLoading(EUIWindowType.Setting))
-                {
-                    return true; // 加载中：Tick 轮询完成后自动跳页
-                }
-                HideBattleHud(ui);
-                ui.ShowUI(EUIWindowType.Setting);
-                pendingSwitch = true;
-                pendingSwitchUntil = Time.unscaledTime + 8f;
-                return true;
-            }
-            catch (Exception e)
-            {
-                ModEntry.Log("[状态] 拉起游戏设置窗口失败：" + e.Message);
-                return false;
-            }
         }
 
         // ===== 嵌入 =====
@@ -156,33 +69,6 @@ namespace TrickMole
                 return ui != null && ui.IsUIOpen(EUIWindowType.Setting);
             }
             catch { return false; }
-        }
-
-        // F6 直接拉设置窗口时，对战 HUD（物品栏/技能条）会从半透明底里透出来；
-        // 按游戏自己的 temp 关闭方式临时收起，设置关掉后再恢复（ESC 菜单路径有菜单背景遮挡，不动）
-        private static UIWindow hiddenHud;
-        private static void HideBattleHud(UIManager ui)
-        {
-            if (hidBattleHud || ui == null) return;
-            try
-            {
-                if (ui.IsUIOpen(EUIWindowType.Menu)) return;
-                hiddenHud = ui.GetOpenUI(EUIWindowType.BattleMain);
-                if (hiddenHud == null) return;
-                ui.CloseUI(EUIWindowType.BattleMain, true);
-                hidBattleHud = true;
-            }
-            catch { }
-        }
-
-        private static void RestoreBattleHud()
-        {
-            if (!hidBattleHud) return;
-            hidBattleHud = false;
-            UIWindow hud = hiddenHud;
-            hiddenHud = null;
-            if (hud == null || hud.gameObject == null) return; // 场景已切走：别在别的场景把 HUD 拉起来
-            try { SingletonT<UIManager>.Instance?.ShowUI(EUIWindowType.BattleMain); } catch { }
         }
 
         private static UISettingView FindSceneView()

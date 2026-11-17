@@ -1,6 +1,5 @@
 using System.Collections.Generic;
 using Mirror;
-using Rewired;
 using UnityEngine;
 
 namespace TrickMole
@@ -10,24 +9,10 @@ namespace TrickMole
         private void Update()
         {
             ModEntry.Tick();
-            TrickMoleGameSettings.Tick(); // 嵌入游戏设置窗口：开窗轮询跳页 + 场景实例扫描 + 数值刷新
-            TrickMolePanel.Refresh();
+            TrickMoleGameSettings.Tick(); // 玩家打开游戏设置窗口时自动挂上「课堂角色」页 + 数值刷新
         }
 
-        private void OnGUI()
-        {
-            // F6 兜底通道：主菜单里游戏输入系统（InputManager/Rewired 玩家）未必激活，IMGUI 事件总能收到按键。
-            // Rewired 就绪时走 HandlePanelKey 的硬件级边沿检测，此通道关闭，避免按住 F6 的 IMGUI 重复 KeyDown 造成面板闪烁
-            if (!MonoSingletonT<InputManager>.IsSingletonActive() || !ReInput.isReady)
-            {
-                if (Event.current.type == EventType.KeyDown && Event.current.keyCode == ModEntry.PanelKey)
-                {
-                    ModEntry.TogglePanel();
-                    Event.current.Use();
-                }
-            }
-            Draw();
-        }
+        private void OnGUI() { Draw(); }
 
         private void OnDestroy() { ModEntry.Cleanup(); }
 
@@ -112,10 +97,6 @@ namespace TrickMole
             foreach (string line in lines) GUILayout.Label(line);
             GUILayout.EndVertical();
             GUILayout.EndArea();
-
-            // 角色配置入口（F6 / 点击）：编辑仅课程外开放，课程中可打开查看
-            if (GUI.Button(new Rect(area.x + 8f, area.y + area.height - 28f, area.width - 16f, 22f), "角色配置（F6）"))
-                ModEntry.TogglePanel();
 
             // 可推时按键浮层（原生键帽样式），冷却/不满足条件不显示
             if (myRole != null && myRole.canPush && state == EClassroomState.Classing && ModEntry.PushCooldownRemain <= 0f && ModEntry.HasPushTarget())
