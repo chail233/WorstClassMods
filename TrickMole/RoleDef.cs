@@ -34,12 +34,6 @@ namespace TrickMole
         public float sightDistance = 10f;                 // 老师视线最大距离（0 = 默认 10m）
     }
 
-    [Serializable]
-    internal sealed class RoleConfigFile
-    {
-        public List<RoleDef> roles = new List<RoleDef>();
-    }
-
     internal static class RoleConfig
     {
         internal static List<RoleDef> Roles = Defaults();
@@ -86,6 +80,8 @@ namespace TrickMole
         }
 
         // 读 ConfigDirectory/trickmole.json；不存在则生成默认，解析失败回退内置角色
+        // 注意：本机引擎的 JsonUtility 会静默跳过 List<自定义类> 字段（实测 ToJson 出 {}、FromJson 出空表），
+        // 所以这里的文件读写都是"整体手工拼 + 逐对象拆解"，只有单个 RoleDef（纯字段类）走 JsonUtility
         internal static void Load(string configDir, Action<string> log)
         {
             try
@@ -94,24 +90,77 @@ namespace TrickMole
                 string path = Path.Combine(configDir, FileName);
                 if (File.Exists(path))
                 {
-                    RoleConfigFile parsed = JsonUtility.FromJson<RoleConfigFile>(File.ReadAllText(path));
-                    if (parsed?.roles != null && parsed.roles.Count > 0)
+                    List<RoleDef> parsed = SplitRoleObjects(File.ReadAllText(path));
+                    if (parsed.Count > 0)
                     {
-                        Roles = parsed.roles;
-                        if (EnsureBuiltIns(log)) File.WriteAllText(path, JsonUtility.ToJson(new RoleConfigFile { roles = Roles }, true));
+                        Roles = parsed;
+                        if (EnsureBuiltIns(log)) File.WriteAllText(path, WriteRolesJson(Roles));
                         log("[状态] 角色配置已加载：" + Roles.Count + " 种角色（" + string.Join("、", Roles.ConvertAll(r => r.name)) + "）");
                         return;
                     }
-                    log("角色配置解析为空，使用内置默认角色");
+                    log("角色配置解析为空，按内置默认重写");
                 }
                 else
                 {
                     Roles = Defaults();
-                    File.WriteAllText(path, JsonUtility.ToJson(new RoleConfigFile { roles = Roles }, true));
                     log("[状态] 已生成默认角色配置: " + path);
                 }
+                File.WriteAllText(path, WriteRolesJson(Roles));
             }
             catch (Exception e) { log?.Invoke("角色配置加载失败，使用内置默认：" + e.Message); }
+        }
+
+        // 手工拼 {"roles":[...]}：文件里仍是人类可读的单个 JSON 对象，但组装不经过会被跳过 List 字段的序列化器
+        private static string WriteRolesJson(List<RoleDef> roles)
+        {
+            var sb = new System.Text.StringBuilder(256 + roles.Count * 512);
+            sb.Append("{\n  \"roles\": [");
+            for (int i = 0; i < roles.Count; i++)
+            {
+                sb.Append(i == 0 ? "\n" : ",\n").Append("    ").Append(JsonUtility.ToJson(roles[i]));
+            }
+            sb.Append("\n  ]\n}");
+            return sb.ToString();
+        }
+
+        // 从 {"roles":[...]} 里按括号配对拆出每个角色对象（字符串字面量里的大括号/引号已跳过），逐个走纯字段解析
+        private static List<RoleDef> SplitRoleObjects(string json)
+        {
+            var roles = new List<RoleDef>();
+            if (string.IsNullOrEmpty(json)) return roles;
+            int arrayStart = json.IndexOf('[');
+            int arrayEnd = json.LastIndexOf(']');
+            if (arrayStart < 0 || arrayEnd <= arrayStart) return roles;
+            bool inString = false;
+            int depth = 0;
+            int objStart = -1;
+            for (int i = arrayStart + 1; i < arrayEnd; i++)
+            {
+                char c = json[i];
+                if (inString)
+                {
+                    if (c == '\\') i++;           // 跳过转义对
+                    else if (c == '"') inString = false;
+                    continue;
+                }
+                if (c == '"') { inString = true; continue; }
+                if (c == '{') { if (depth == 0) objStart = i; depth++; }
+                else if (c == '}')
+                {
+                    depth--;
+                    if (depth == 0 && objStart >= 0)
+                    {
+                        try
+                        {
+                            RoleDef role = JsonUtility.FromJson<RoleDef>(json.Substring(objStart, i - objStart + 1));
+                            if (role != null) roles.Add(role);
+                        }
+                        catch { } // 单个坏对象不拖累其余角色
+                        objStart = -1;
+                    }
+                }
+            }
+            return roles;
         }
 
         // 旧配置（只有混的入）自动补上内置角色，并写回文件让玩家看得见可调项

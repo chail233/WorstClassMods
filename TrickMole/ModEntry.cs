@@ -17,24 +17,14 @@ namespace TrickMole
     /// 其正向捣蛋计分乘以加成倍数（负分不乘，被抓照样扣）。
     /// 服务端选定后经自定义 Mirror 消息广播，所有端本地显示。
     /// </summary>
-    /// <summary>角色分配：服务端全量快照广播（Version 全局单调递增），客机整体替换分配表，杜绝增量漂移（重连残留/错过清场都会被下一条全量自愈）；空列表=清空。</summary>
+    /// <summary>角色分配：服务端全量快照广播（Version 全局单调递增），客机整体替换分配表，杜绝增量漂移（重连残留/错过清场都会被下一条全量自愈）；空数组=清空。</summary>
+    /// <summary>本机引擎（2022.3.62f3c1 中国变体）的 JsonUtility 会静默跳过 List&lt;自定义类&gt; 字段（实测 ToJson 返回 {}），所以分配数据不走 JSON 包装，
+    /// 直接放 Mirror 结构体的原生数组里逐条序列化；每条角色参数是纯字段类的独立 JSON（实测可靠，BioChemConfig 同型已验证）。</summary>
     public struct MoleSelectMessage : NetworkMessage
     {
         public uint Version;
-        public string AssignmentsJson; // 全量分配快照（MoleAssignList 序列化）；服务端权威，客机直接用消息里的副本
-    }
-
-    [Serializable]
-    public class MoleAssignEntry
-    {
-        public long uid;        // ulong 经 long 承载（JsonUtility 对 ulong 支持不稳）
-        public string roleJson; // RoleDef 序列化
-    }
-
-    [Serializable]
-    public class MoleAssignList
-    {
-        public List<MoleAssignEntry> entries = new List<MoleAssignEntry>();
+        public long[] Uids;        // 分配单位的 UID（ulong 经 long 承载，与 RoleJsons 一一对应）
+        public string[] RoleJsons; // 每项 = 单个 RoleDef 的 JSON
     }
 
     /// <summary>Kind: 1=Start（C2S 请求/S2C 广播，S2C 带曲目与起点） 2=Stop（仅 S2C） 3=StopRequest（仅 C2S，手动停止/播完）</summary>
@@ -424,71 +414,54 @@ namespace TrickMole
             return false;
         }
 
-        // 全量快照广播（Version 全局单调递增；空表=清空，重广播也递增让客户端无条件替换）
+        // 全量快照广播（Version 全局单调递增；空数组=清空，重广播也递增让客户端无条件替换）
         private static void BroadcastAssignments()
         {
             version++;
             if (!RoomManager.IsSingletonActive() || !NetworkServer.active) return;
-            var snapshot = new MoleAssignList();
+            var uids = new List<long>(assigned.Count);
+            var roleJsons = new List<string>(assigned.Count);
             foreach (var pair in assigned)
-                snapshot.entries.Add(new MoleAssignEntry { uid = (long)pair.Key, roleJson = JsonUtility.ToJson(pair.Value) });
-            // 序列化双保险：优先 JsonUtility（其输出在客机端解析已被证实可靠）；
-            // 个别环境它会把含 entries 的快照稳定序列化成空串（2.3.x 工坊主机实测），此时手工拼装兜底
-            string json = null;
-            Exception buildError = null;
-            try { json = JsonUtility.ToJson(snapshot); }
-            catch (Exception e) { buildError = e; }
-            if (string.IsNullOrEmpty(json) && assigned.Count > 0)
             {
-                json = BuildAssignmentsJson();
-                Log("[警告] 角色快照 JsonUtility 序列化" + (buildError != null ? "抛异常：" + buildError.Message : "结果为空") + "，已用手工拼装兜底（" + json.Length + " 字节）");
+                uids.Add((long)pair.Key);
+                roleJsons.Add(BuildRoleJsonSafe(pair.Value));
             }
-            // 主机端回读自检：与客机同一套 JsonUtility 解析，回读失败 = 客机也必然解析失败
-            string roundtrip = null;
-            try
-            {
-                var check = JsonUtility.FromJson<MoleAssignList>(json);
-                roundtrip = check != null && check.entries != null ? check.entries.Count.ToString() : "null";
-            }
-            catch (Exception e) { roundtrip = "抛异常:" + e.Message; }
             RoomManager.Instance.BroadcastToAllExceptHost(
-                new MoleSelectMessage { Version = version, AssignmentsJson = json }, 0);
-            // 诊断：内容变化必打，稳定重广播每 60 秒打一次（与遥测/客机日志对账用）
-            if (json != lastBroadcastJson || Time.unscaledTime >= nextBroadcastLog)
+                new MoleSelectMessage { Version = version, Uids = uids.ToArray(), RoleJsons = roleJsons.ToArray() }, 0);
+            // 诊断：条数变化必打，稳定重广播每 60 秒打一次；回读=用与客机同一套 JsonUtility 解析首条角色，失败即客机也必然失败
+            if (uids.Count != lastBroadcastCount || Time.unscaledTime >= nextBroadcastLog)
             {
-                lastBroadcastJson = json;
+                lastBroadcastCount = uids.Count;
                 nextBroadcastLog = Time.unscaledTime + 60f;
-                int prefixLen = Math.Min(200, json != null ? json.Length : 0);
-                Log("[状态] 广播角色快照 v" + version + "：" + assigned.Count + " 条，JSON " + (json != null ? json.Length : 0) + " 字节，回读=" + roundtrip
-                    + (assigned.Count > 0 && string.IsNullOrEmpty(json) ? "（异常：有分配但快照为空！）" : "")
-                    + "\n快照前缀：" + (json != null ? json.Substring(0, prefixLen) : "null"));
+                string roundtrip = "无条目";
+                if (roleJsons.Count > 0)
+                {
+                    try
+                    {
+                        RoleDef check = JsonUtility.FromJson<RoleDef>(roleJsons[0]);
+                        roundtrip = check != null ? "OK(id=" + check.id + ")" : "null";
+                    }
+                    catch (Exception e) { roundtrip = "抛异常:" + e.Message; }
+                }
+                Log("[状态] 广播角色快照 v" + version + "：" + uids.Count + " 条，回读=" + roundtrip
+                    + (uids.Count > 0 && roleJsons.Exists(string.IsNullOrEmpty) ? "（异常：有条目但角色 JSON 为空！）" : ""));
             }
         }
 
-        private static string lastBroadcastJson;
+        private static int lastBroadcastCount = -1;
         private static float nextBroadcastLog;
 
-        // 手工拼角色快照 JSON：不再走 JsonUtility 序列化。
-        // 工坊 2.3.x 主机端实测 JsonUtility.ToJson(快照) 稳定返回空串（主机自己不解析这个 JSON 所以毫无感知，
-        // 客机收到的全是 {版本,空串} 空包 → 右上角无名单、角色效果全失效）。字段名与 JsonUtility 完全一致，客机解析不变。
-        private static string BuildAssignmentsJson()
+        // 单个角色的 JSON：纯字段类，JsonUtility 可靠（BioChemConfig 同型已验证）；异常时手工拼装兜底
+        private static string BuildRoleJsonSafe(RoleDef role)
         {
-            var sb = new System.Text.StringBuilder(96 + assigned.Count * 512);
-            sb.Append("{\"entries\":[");
-            bool first = true;
-            foreach (var pair in assigned)
-            {
-                if (!first) sb.Append(',');
-                first = false;
-                sb.Append("{\"uid\":").Append((long)pair.Key).Append(",\"roleJson\":")
-                  .Append(EncodeJsonString(BuildRoleJson(pair.Value))).Append('}');
-            }
-            sb.Append("]}");
-            return sb.ToString();
+            string json = null;
+            try { json = JsonUtility.ToJson(role); } catch { }
+            if (string.IsNullOrEmpty(json)) json = BuildRoleJson(role);
+            return json;
         }
 
-        // 手工拼 RoleDef：字段名/顺序与 JsonUtility 一致，客机 FromJson<RoleDef> 直接可读；
-        // 客机侧旧版本缺字段时按 JsonUtility 规则读回 0/false，天然向前兼容
+        // 手工拼 RoleDef：字段名/顺序与 JsonUtility 一致，仅作 BuildRoleJsonSafe 的兜底；
+        // float 必须固定用不变文化输出（区域设置带逗号小数点的机器会拼出非法 JSON）
         private static string BuildRoleJson(RoleDef role)
         {
             if (role == null) return "{}";
@@ -1189,49 +1162,25 @@ namespace TrickMole
         private static void OnMoleSelect(MoleSelectMessage message)
         {
             if (NetworkServer.active) return;
-            string raw = message.AssignmentsJson;
-            List<MoleAssignEntry> entries;
-            try
-            {
-                entries = string.IsNullOrEmpty(raw)
-                    ? new List<MoleAssignEntry>()
-                    : JsonUtility.FromJson<MoleAssignList>(raw).entries;
-            }
-            catch (Exception e)
-            {
-                Log("角色同步包解析失败 v" + message.Version + "：len=" + (raw?.Length ?? 0) + "，" + e.Message
-                    + "，包前缀：" + (string.IsNullOrEmpty(raw) ? "空" : raw.Substring(0, Math.Min(160, raw.Length))));
-                return; // 畸形包不应用，等下一轮全量重广播自愈
-            }
-            if (entries == null)
-            {
-                // JsonUtility 对异形包可能返回 null entries（此前静默 NRE 被 Mirror 吞掉），显式记录
-                Log("[警告] 角色快照解析出 null entries v" + message.Version + "：len=" + (raw?.Length ?? 0)
-                    + "，包前缀：" + (string.IsNullOrEmpty(raw) ? "空" : raw.Substring(0, Math.Min(160, raw.Length))));
-                entries = new List<MoleAssignEntry>();
-            }
             version = message.Version;
-            var sig = new System.Text.StringBuilder();
-            foreach (MoleAssignEntry entry in entries) sig.Append(entry.uid).Append(',');
-            string signature = sig.ToString();
-            // 全量替换：客机分配表与服务端严格一致，不会残留旧角色
+            int count = message.Uids?.Length ?? 0;
             assigned.Clear();
-            foreach (MoleAssignEntry entry in entries)
+            for (int i = 0; i < count; i++)
             {
-                if (entry.uid == 0) continue;
-                RoleDef role = ParseRole(entry.roleJson);
-                if (role != null) assigned[(ulong)entry.uid] = role;
+                ulong uid = (ulong)message.Uids[i];
+                if (uid == 0) continue;
+                string roleJson = i < (message.RoleJsons?.Length ?? 0) ? message.RoleJsons[i] : null;
+                RoleDef role = ParseRole(roleJson);
+                if (role != null) assigned[uid] = role;
             }
-            // 诊断：长度/条数/应用数任一变化必打（同内容重广播不打防刷屏），带包前缀可与主机日志/遥测对账
-            int rawLen = raw?.Length ?? 0;
-            if (rawLen != lastLoggedRawLen || entries.Count != lastLoggedEntryCount || assigned.Count != lastLoggedApplied)
+            // 诊断：条数/应用数任一变化必打（同内容重广播不打防刷屏）
+            if (count != lastLoggedEntryCount || assigned.Count != lastLoggedApplied)
             {
-                lastLoggedRawLen = rawLen;
-                lastLoggedEntryCount = entries.Count;
+                lastLoggedEntryCount = count;
                 lastLoggedApplied = assigned.Count;
-                Log("[状态] 角色同步 v" + message.Version + "：len=" + rawLen + "，解析 " + entries.Count + " 条 → 应用 " + assigned.Count + " 条"
-                    + (entries.Count > 0 && assigned.Count == 0 ? "（异常：有条目但角色全解析失败！）" : "")
-                    + "，包前缀：" + (string.IsNullOrEmpty(raw) ? "空" : raw.Substring(0, Math.Min(160, rawLen))));
+                Log("[状态] 角色同步 v" + message.Version + "：收到 " + count + " 条 → 应用 " + assigned.Count + " 条"
+                    + (count > 0 && assigned.Count == 0 ? "（异常：有条目但角色全解析失败！）" : "")
+                    + (count == 0 ? "（清场）" : ""));
             }
             // 失去角色的捣蛋累计与免伤状态一并清掉（本地 UI 口径）
             var stale = new HashSet<ulong>();
@@ -1252,7 +1201,6 @@ namespace TrickMole
             }
         }
 
-        private static int lastLoggedRawLen = -1;
         private static int lastLoggedEntryCount = -1;
         private static int lastLoggedApplied = -1;
 

@@ -101,20 +101,28 @@ namespace TrickMole
 
         // ===== Mirror 手工序列化 =====
 
-        internal static void WriteMole(NetworkWriter writer, MoleSelectMessage message)
-        {
-            writer.WriteUInt(message.Version);
-            writer.WriteString(message.AssignmentsJson);
-        }
+    internal static void WriteMole(NetworkWriter writer, MoleSelectMessage message)
+    {
+        writer.WriteUInt(message.Version);
+        int n = message.Uids?.Length ?? 0;
+        writer.WriteInt(n);
+        for (int i = 0; i < n; i++) writer.WriteLong(message.Uids[i]);
+        string[] roleJsons = message.RoleJsons ?? new string[0];
+        writer.WriteInt(roleJsons.Length);
+        for (int i = 0; i < roleJsons.Length; i++) writer.WriteString(roleJsons[i]);
+    }
 
-        internal static MoleSelectMessage ReadMole(NetworkReader reader)
-        {
-            return new MoleSelectMessage
-            {
-                Version = reader.ReadUInt(),
-                AssignmentsJson = reader.ReadString()
-            };
-        }
+    internal static MoleSelectMessage ReadMole(NetworkReader reader)
+    {
+        uint version = reader.ReadUInt();
+        int n = reader.ReadInt();
+        var uids = new long[n];
+        for (int i = 0; i < n; i++) uids[i] = reader.ReadLong();
+        int m = reader.ReadInt();
+        var roleJsons = new string[m];
+        for (int i = 0; i < m; i++) roleJsons[i] = reader.ReadString();
+        return new MoleSelectMessage { Version = version, Uids = uids, RoleJsons = roleJsons };
+    }
 
         internal static void WriteMusic(NetworkWriter writer, MoleMusicMessage message)
         {
