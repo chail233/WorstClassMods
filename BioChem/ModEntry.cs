@@ -989,14 +989,15 @@ namespace BioChem
             Log("[状态] " + GetName(uid) + " HP 归零晕倒，" + Config.downSeconds.ToString("0") + " 秒后在办公室复活");
         }
 
-        // 找办公室复活点：大老师的出生点（老师开局在办公室）；找不到退回本人出生点
+        // 找办公室复活点：大老师的出生点（老师开局在办公室）；找不到退回本人出生点。
+        // 必须用原生 UnitSubType 判定——用翻转后的 IsTeacher 会把猎手当成锚点（猎手出生在课桌不在办公室）
         private static Vector3 FindOfficePosition(ulong uid)
         {
             if (UnitManager.IsSingletonActive())
             {
                 foreach (Unit unit in UnitManager.Instance.playerList)
                 {
-                    if (unit != null && unit.isActived && unit.isPlayer && unit.IsTeacher && !infected.Contains(unit.UID))
+                    if (unit != null && unit.isActived && unit.isPlayer && unit.UnitSubType == EUnitSubType.Teacher && !infected.Contains(unit.UID))
                         return unit.BornPosition;
                 }
                 Unit self = UnitManager.Instance.GetUnitByUID(uid);
@@ -1144,13 +1145,14 @@ namespace BioChem
             Log("[状态] " + GetName(uid) + " 变身成了老师猎手（HP " + Config.hunterHp + "）");
         }
 
-        // 各端变身表现：模型放大 + 电弧特效 + 公告（hunterOrigScale 兼做"已放大"幂等标记）
+        // 各端变身表现：先入 hunters（身份翻转/物品封禁立刻生效，模型未绑定的过渡帧也不能丢身份），
+        // 再做放大+特效（模型未就绪时视觉部分跳过，快照自愈）
         private static void ApplyHunterTransformLocal(BioChemHunterMessage message)
         {
             if (!UnitManager.IsSingletonActive()) return;
+            hunters.Add(message.UnitUID);
             Unit unit = UnitManager.Instance.GetUnitByUID(message.UnitUID);
             if (unit == null || !unit.isActived || unit.model == null) return;
-            hunters.Add(message.UnitUID);
             if (!hunterOrigScale.ContainsKey(message.UnitUID))
             {
                 hunterOrigScale[message.UnitUID] = unit.model.gameObject.transform.localScale;
@@ -1160,6 +1162,8 @@ namespace BioChem
             if (message.UnitUID == UnitManager.Instance.localPlayerUID)
             {
                 localMgMode = false; // 猎手固定近战：本地连发模式清掉
+                // 变身时若正按住使用物品，输入被吞后松开事件也收不到——主动停用防"物品自动续用"卡滞
+                unit.GetComponent<StudentItemUseComponent>()?.StopUseItem();
             }
             NotifyAll(GetName(message.UnitUID) + " 变身成了老师猎手！");
         }
@@ -1177,9 +1181,12 @@ namespace BioChem
             hunters.Remove(message.UnitUID);
             if (!UnitManager.IsSingletonActive()) return;
             Unit unit = UnitManager.Instance.GetUnitByUID(message.UnitUID);
-            if (unit == null || unit.model == null) return;
             if (hunterOrigScale.TryGetValue(message.UnitUID, out Vector3 origScale))
-                unit.model.gameObject.transform.localScale = origScale;
+            {
+                if (unit != null && unit.model != null)
+                    unit.model.gameObject.transform.localScale = origScale;
+                hunterOrigScale.Remove(message.UnitUID);
+            }
         }
 
         // 猎手近战：客户端选目标上报，服务端校验距离/冷却后结算（前摇只做挥手动画，伤害即时）
@@ -1322,11 +1329,17 @@ namespace BioChem
             if (unit != null && unit.isActived && !unit.IsDead && hunters.Contains(unit.UID)) __result = unit;
         }
 
-        // 服务端剑击结算：命中猎手 → 扣 HP（原生对 IsTeacher 目标会直接 return）
-        public static bool BeforeChalkHit(UnitMessageHandler __instance, ChalkHitRequest_C2S request)
+        // 服务端剑击结算：命中猎手 → 扣 HP（原生对 IsTeacher 目标会直接 return）。
+        // prefix 跳过了原生的上报者/位置校验，这里补上同款防伪：上报者=老师本人、命中点距猎手 ≤3m
+        public static bool BeforeChalkHit(UnitMessageHandler __instance, NetworkConnectionToClient connectionToClient, ChalkHitRequest_C2S request)
         {
             if (!enabled || !NetRuntime.IsServer || !hunters.Contains(request.UnitUID)) return true;
             if (killedTeachers.Contains(request.UnitUID)) return false;
+            ulong sender = ResolveSender(connectionToClient);
+            if (sender != request.TeacherUID) return true;
+            Unit hunter = UnitManager.IsSingletonActive() ? UnitManager.Instance.GetUnitByUID(request.UnitUID) : null;
+            if (hunter == null || !hunter.isActived || hunter.IsDead) return false;
+            if ((hunter.Position - request.Position).sqrMagnitude > 9f) return true; // 与原生同款 3m 门槛，伪造上报交回原生拒绝
             DamageHunter(request.UnitUID, HunterTakenDamage, request.TeacherUID);
             return false;
         }
