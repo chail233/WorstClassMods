@@ -844,10 +844,13 @@ namespace TrickMole
         // 背后且近距离：学生位于老师身后约 110° 扇区内且距离 ≤ 角色配置的触发距离
         private static bool IsBehindAndClose(Unit student, Unit teacher, RoleDef role)
         {
+            // 模型未绑定的过渡帧（NPC 老师异步加载等）连 transform 都没有，位置/朝向都不可信
+            Transform teacherRoot = teacher.transform;
+            if (teacherRoot == null || student.transform == null) return false;
             Vector3 toStudent = student.Position - teacher.Position;
             toStudent.y = 0f;
             if (toStudent.magnitude > role.pushRange) return false;
-            Vector3 fwd = teacher.transform.forward;
+            Vector3 fwd = teacherRoot.forward;
             fwd.y = 0f;
             if (fwd.sqrMagnitude < 0.0001f) return true; // 朝向缺失时不额外限制
             return Vector3.Dot(fwd.normalized, toStudent.normalized) < role.pushBehindDot;
@@ -1096,6 +1099,10 @@ namespace TrickMole
         private static bool ComputeTeacherSight(Unit student, RoleDef role)
         {
             if (!UnitManager.IsSingletonActive()) return false;
+            // LogicObject.transform 在模型未绑定/已回收时返回 null（NPC 老师模型异步加载的空窗期常见），
+            // 此时连 forward 都取不到，必须整段跳过
+            Transform studentRoot = student.transform;
+            if (studentRoot == null) return false;
             Transform studentHead = student.GetPartRoot(EUnitPartType.HeadPosition);
             Vector3 studentPos = studentHead != null ? studentHead.position : student.Position + Vector3.up;
             float halfAngle = Mathf.Max(1f, role.sightAngleDegrees > 0f ? role.sightAngleDegrees : 110f) * 0.5f * Mathf.Deg2Rad;
@@ -1108,13 +1115,15 @@ namespace TrickMole
             {
                 if (teacher == null || teacher == student) continue;
                 if (!teacher.isActived || teacher.IsDead || !teacher.IsTeacher || teacher.IsStun) continue;
+                Transform teacherRoot = teacher.transform;
+                if (teacherRoot == null) continue; // isActived 已置位但 model 还没绑定的过渡帧
                 Transform teacherHead = teacher.GetPartRoot(EUnitPartType.HeadPosition);
                 Vector3 origin = teacherHead != null ? teacherHead.position : teacher.Position + Vector3.up;
                 Vector3 delta = studentPos - origin;
                 float distance = delta.magnitude;
                 if (distance < 0.01f || distance > maxDistance) continue;
-                if (Vector3.Dot(teacher.transform.forward, delta / distance) < cosHalf) continue;
-                if (HasObstacleBetween(origin, delta, distance, teacher.transform, student.transform)) continue;
+                if (Vector3.Dot(teacherRoot.forward, delta / distance) < cosHalf) continue;
+                if (HasObstacleBetween(origin, delta, distance, teacherRoot, studentRoot)) continue;
                 return true;
             }
             return false;
