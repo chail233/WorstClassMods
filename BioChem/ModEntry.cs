@@ -164,7 +164,7 @@ namespace BioChem
         private static Vector3 lastSelfPos;
         private static bool lastSelfPosValid;
 
-        private static readonly MethodInfo ReleaseStudentOnServerMethod =
+        internal static readonly MethodInfo ReleaseStudentOnServerMethod =
             AccessTools.Method(typeof(SkillMessageHandler), "ReleaseStudentOnServer");
         // 原生规范传送（internal）：NetData.Position + SyncTransform 立即生效 + 刚体落位 + 输入复位，
         // 裸 Unit.SetPosition 只动 transform 不动刚体，复活/传送类场景必须走这个
@@ -231,6 +231,10 @@ namespace BioChem
                     prefix: new HarmonyMethod(typeof(ModEntry), "BeforeHunterStudentItemInput"));
                 harmony.Patch(AccessTools.Method(typeof(MouthItemUseComponent), "GetCmdInput"),
                     prefix: new HarmonyMethod(typeof(ModEntry), "BeforeHunterMouthItemInput"));
+                // 小老师抓取：DealArrestEffect 查 localPlayer 的 SkillComponent（学生预制体没有）——
+                // prefix 仅在 localPlayer 感染时接管（复刻原方法去掉能量门槛），真老师走原方法，猎手不在 infected 不开放
+                harmony.Patch(AccessTools.Method(typeof(StudentInterectComponent), "DealArrestEffect"),
+                    prefix: new HarmonyMethod(typeof(MiniTeacherCatch), nameof(MiniTeacherCatch.BeforeDealArrestEffect)));
                 Writer<BioChemHunterMessage>.write = BioChemPump.WriteHunter;
                 Reader<BioChemHunterMessage>.read = BioChemPump.ReadHunter;
                 // 挂柱计时：绑定开始记录，释放清除；超时由服务端 Tick 强制释放并感染
@@ -395,6 +399,7 @@ namespace BioChem
             hp[uid] = Config.miniMaxHp;
             stamina[uid] = Config.staminaMax;
             RevokeTaser(uid); // 被感染即失去吹箭筒
+            MiniTeacherCatch.EnsureCatchAbility(uid); // 感染即补挂原生 CatchComponent（抓取/挂柱能力）
             if (UnitManager.IsSingletonActive() && uid == UnitManager.Instance.localPlayerUID)
             {
                 selfStamina = Config.staminaMax;
@@ -991,6 +996,7 @@ namespace BioChem
 
         private static void DownUnit(ulong uid)
         {
+            MiniTeacherCatch.ForceReleaseIfCarrying(uid); // 小老师无 TeacherStunComponent，原生"被晕放手"不生效——强制放下
             downedUntil[uid] = Time.unscaledTime + Config.downSeconds;
             var down = new BioChemDownMessage { Kind = BioChemDownMessage.Down, UnitUID = uid, Position = FindOfficePosition(uid) };
             Broadcast(down);
@@ -1284,6 +1290,7 @@ namespace BioChem
         // 击杀出局：永久倒地（各端持续续晕压躺），不进 downedUntil 复活流程
         private static void KillTeacher(ulong uid)
         {
+            MiniTeacherCatch.ForceReleaseIfCarrying(uid); // 扛人者被永久击杀：先原地放下学生
             killedTeachers.Add(uid);
             var kill = new BioChemDownMessage { Kind = BioChemDownMessage.Kill, UnitUID = uid, Position = Vector3.zero };
             Broadcast(kill);
@@ -1502,6 +1509,7 @@ namespace BioChem
             localHunterStrikeReadyAt = 0f;
             hunterUnlockAnnounced = false;
             HunterKnife.RemoveAll(); // 猎刀随回合重置全收（模式关闭也走这里）
+            MiniTeacherCatch.RemoveAll(); // 收回小老师抓取组件（学生状态由原生回合重置负责）
         }
 
         private static void OnClassStateChanged(EClassroomState state)
@@ -1530,6 +1538,7 @@ namespace BioChem
             killedTeachers.Remove(playerUID);
             hunterStrikeReadyAt.Remove(playerUID);
             HunterKnife.Remove(playerUID);
+            MiniTeacherCatch.RemoveCatchAbility(playerUID); // 断线清理：注销组件上的 msg 2017 监听
             if (hunterOrigScale.Remove(playerUID) && UnitManager.IsSingletonActive())
             {
                 Unit removedUnit = UnitManager.Instance.GetUnitByUID(playerUID);
@@ -1585,7 +1594,11 @@ namespace BioChem
             }
             infected.Clear();
             foreach (long uid in dto.infected)
-                if (uid != 0) infected.Add((ulong)uid);
+            {
+                if (uid == 0) continue;
+                infected.Add((ulong)uid);
+                MiniTeacherCatch.EnsureCatchAbility((ulong)uid); // 快照即补抓取组件（单位未就绪时 Tick 自愈兜底）
+            }
             hunters.Clear();
             foreach (long uid in dto.hunters)
                 if (uid != 0) hunters.Add((ulong)uid);
@@ -1633,6 +1646,7 @@ namespace BioChem
             if (enabled)
             {
                 TickHunterMelee();
+                MiniTeacherCatch.TickSelfHeal(); // 感染名单里的抓取组件自愈（1s 节流）
                 TickKilledTeachers();
                 if (NetRuntime.IsServer)
                 {

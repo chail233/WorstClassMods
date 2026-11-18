@@ -83,6 +83,7 @@ namespace BioChem
                     lines.Add("体力不足，无法击晕（需 " + ModEntry.Config.staminaCostPerStun.ToString("0.#") + "）");
                 else
                     lines.Add("按 F 击晕身边的学生（耗体力 " + ModEntry.Config.staminaCostPerStun.ToString("0.#") + "）");
+                lines.Add("靠近被眩晕的学生按交互键抓取，扛到罚站柱挂上（携带超时会自动放下）");
             }
             else if (big)
             {
