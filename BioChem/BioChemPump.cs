@@ -93,19 +93,28 @@ namespace BioChem
             {
                 if (ModEntry.HunterUnlocked)
                     lines.Add("按 G 变身老师猎手！");
-                // 备弹：耗尽时提醒吃东西补弹（服务端拒发，连发循环也会停）
-                if (ModEntry.SelfDartAmmo <= 0)
-                    lines.Add("备弹耗尽！吃东西补充弹药");
-                else
-                    lines.Add("备弹 " + ModEntry.SelfDartAmmo + "/" + ModEntry.Config.dartMaxAmmo + "（吃东西补充）");
                 Unit selfUnit = UnitManager.IsSingletonActive() ? UnitManager.Instance.GetUnitByUID(UnitManager.Instance.localPlayerUID) : null;
-                // 嘴部叼的是吹箭才提示操作；被气球/泡泡糖占用时不误导（按 1/2 会被服务端拒绝）
+                // 嘴部挂着 AK（原生吹箭物品）才显示弹药/操作提示；被气球/泡泡糖占用时不误导（按 1/2 会被服务端拒绝）
                 Unit mouthItem = selfUnit != null && selfUnit.isActived
                     ? selfUnit.GetComponent<MouthItemUseComponent>()?.currentMouthItem : null;
-                if (mouthItem != null && mouthItem.UnitSubType == EUnitSubType.Taser)
-                    lines.Add("连发吹箭筒：右键瞄准、按住左键连发（按 1 收起）");
+                bool akEquipped = mouthItem != null && mouthItem.UnitSubType == EUnitSubType.Taser;
+                if (akEquipped)
+                {
+                    // 弹匣+备弹双计数（弹匣是客户端节奏，备弹是服务端权威）；耗尽时提醒吃东西补弹
+                    if (ModEntry.SelfDartAmmo <= 0)
+                        lines.Add("备弹耗尽！吃东西补充弹药");
+                    else
+                        lines.Add("弹匣 " + Ak47Weapon.Mag + "/" + Ak47Weapon.MagSize + " · 备弹 " + ModEntry.SelfDartAmmo + "/" + ModEntry.Config.dartMaxAmmo + "（吃东西补充）");
+                    if (Ak47Weapon.Reloading)
+                        lines.Add("换弹中…" + Ak47Weapon.ReloadRemain.ToString("0.0") + "s");
+                    lines.Add("AK47：右键瞄准、按住左键连发，R 换弹（按 1 收起）");
+                }
                 else if (mouthItem == null)
-                    lines.Add("按 1 掏出连发吹箭筒");
+                {
+                    if (ModEntry.SelfDartAmmo <= 0)
+                        lines.Add("备弹耗尽！吃东西补充弹药");
+                    lines.Add("按 1 掏出 AK47");
+                }
             }
             // 吹箭伤害随小老师人数递增：所有身份上课期间都显示当前有效伤害与感染加成（房主把加伤设 0 时只显示基础伤害）
             if (state == EClassroomState.Classing)

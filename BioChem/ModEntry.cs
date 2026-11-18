@@ -113,6 +113,7 @@ namespace BioChem
         private const int PlayerRemovedMsgId = 2017;
 
         internal static BioChemConfig Config => BioChemConfig.Instance;
+        internal static string ModDirectory; // mod 部署目录（读自身资源，如 AK47 模型/枪声）
 
         // ===== 全局模式状态（服务端权威，快照广播对齐） =====
         internal static bool enabled;
@@ -197,7 +198,9 @@ namespace BioChem
         public void OnLoad(ModContext context)
         {
             Log = context.Log;
+            ModDirectory = context.ModDirectory;
             BioChemConfig.Load(context.ConfigDirectory, Log);
+            Ak47Weapon.Init(ModDirectory); // 曳光弹换装 + AK 枪声预载（内部懒重试）
             var harmony = new Harmony(HarmonyId);
             try
             {
@@ -266,6 +269,10 @@ namespace BioChem
                     postfix: new HarmonyMethod(typeof(ModEntry), "RegisterClient"));
                 harmony.Patch(AccessTools.Method(typeof(RoomManager), "RegisterServerMessageHandlers"),
                     postfix: new HarmonyMethod(typeof(ModEntry), "RegisterServer"));
+                // AK47：抑制原生 Taser 发射"啾"声（PlayFire 每发都播），换成本包枪声
+                harmony.Patch(AccessTools.Method(typeof(AudioManager), "PlayOneShot",
+                        new[] { typeof(AudioEvents), typeof(Vector3), typeof(PlaySoundRequest) }),
+                    prefix: new HarmonyMethod(typeof(Ak47Weapon), nameof(Ak47Weapon.SuppressTaserFireSound)));
                 Writer<BioChemStateMessage>.write = BioChemPump.WriteState;
                 Reader<BioChemStateMessage>.read = BioChemPump.ReadState;
                 Writer<BioChemDartMessage>.write = BioChemPump.WriteDart;
@@ -487,6 +494,7 @@ namespace BioChem
             if (!UnitManager.IsSingletonActive() || message.TargetUID != UnitManager.Instance.localPlayerUID) return;
             int before = selfDartAmmo;
             selfDartAmmo = Mathf.Max(0, message.TargetHp);
+            Ak47Weapon.OnAmmoSynced(); // 备弹权威校准：弹匣 clamp 到备弹内（备弹空则取消换弹）
             if (before >= 0 && selfDartAmmo > before)
                 NotifySelf("食物补充了吹箭弹药：" + selfDartAmmo + "/" + Config.dartMaxAmmo);
         }
@@ -632,6 +640,7 @@ namespace BioChem
         {
             if (!localMgMode || !enabled) return;
             if (!Input.GetMouseButton(0)) return; // 按住左键
+            if (Ak47Weapon.BlockFire()) return;   // 换弹中/空匣不发（空匣且还有备弹时按住扳机自动换弹）
             if (Time.unscaledTime < mgNextFireAt) return;
             if (selfDartAmmo <= 0) return; // 备弹耗尽（服务端 AmmoSync 权威校准，本地先扣保证手感）
             if (!CanClassAct()) return;
@@ -649,6 +658,7 @@ namespace BioChem
             var args = new object[] { self, cam.transform, null };
             if (!(TaserTryBuildShotMethod.Invoke(taser, args) is bool ok) || !ok) return;
             var shot = (TaserFired_S2C)args[2];
+            shot.origin = Ak47Weapon.GetMuzzleWorldPos(); // 曳光/枪声/远端渲染统一从枪口出（服务端只查 NaN/Inf 不校验距离）
 
             mgNextFireAt = Time.unscaledTime + Config.fireInterval;
             if (selfDartAmmo > 0) selfDartAmmo--; // 本地乐观扣减，服务端 AmmoSync 随后校准
@@ -661,7 +671,8 @@ namespace BioChem
             shot.userUID = self.UID;
             shot.itemUID = shotUid;
 
-            PlayFireShot(shot); // 本地预测渲染（弹体+拖尾+音效）
+            PlayFireShot(shot); // 本地预测渲染（曳光弹已换装为 AK 曳光）
+            Ak47Weapon.OnShotFired(); // 弹匣-1 + 口焰 + 后坐
             var msg = new BioChemDartMessage
             {
                 Kind = BioChemDartMessage.MgFire,
@@ -1491,6 +1502,7 @@ namespace BioChem
             dartAmmo.Clear();
             foodRefillReadyAt.Clear();
             selfDartAmmo = Config.dartMaxAmmo; // 新一局备弹回满（与服务端懒初始化口径一致）
+            Ak47Weapon.ResetForNewRound(); // AK 全收：世界枪/viewmodel/弹匣/换弹状态归零
             selfStamina = -1f;
             localStunReadyAt = 0f;
             localMgMode = false;
@@ -1647,6 +1659,7 @@ namespace BioChem
             {
                 TickHunterMelee();
                 MiniTeacherCatch.TickSelfHeal(); // 感染名单里的抓取组件自愈（1s 节流）
+                Ak47Weapon.Tick();               // AK47 世界枪/ viewmodel/换弹驱动
                 TickKilledTeachers();
                 if (NetRuntime.IsServer)
                 {
@@ -1764,6 +1777,8 @@ namespace BioChem
                 }
             }
             if (kb.GetKeyDown(StunKey) && !InputOverFrozen()) TryMiniStun();
+            // R 换弹：仅本地持 AK（嘴上挂着吹箭）时响应，TryReload 内部自行判装备状态
+            if (kb.GetKeyDown(KeyCode.R) && !InputOverFrozen()) Ak47Weapon.TryReload();
             // G 变身老师猎手：剩余学生 ≤ hunterTriggerStudents 时解锁（服务端会复验）
             if (kb.GetKeyDown(HunterKey) && !InputOverFrozen() && CanTransformHunter()) SendTransformRequest();
         }

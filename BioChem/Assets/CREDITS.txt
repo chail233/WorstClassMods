@@ -1,0 +1,5 @@
+AK47 模型：ak47.obj — OpenGameArt "Low Poly Weapon Pack"（CC0 公有领域，无需署名）
+  https://opengameart.org/content/low-poly-weapon-pack
+枪声音效：ak47_shot.wav — 裁剪自 OpenGameArt "Gunshot Sounds" 的 SKS 单发
+  作者 Vincent Sevedge，CC-BY 3.0 授权（本 mod 描述中已署名）
+  https://opengameart.org/content/gunshot-sounds
