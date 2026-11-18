@@ -25,7 +25,11 @@ namespace BioChem
                     Event.current.Use();
                 }
             }
-            if (ModEntry.enabled) DrawBars();
+            if (ModEntry.enabled)
+            {
+                DrawBars();
+                HunterFeedback.DrawOverlay(); // 猎刀命中标记/伤害浮字（攻击者本机，空状态零开销早退）
+            }
         }
 
         private void OnDestroy() { ModEntry.Cleanup(); }
@@ -69,7 +73,7 @@ namespace BioChem
             var lines = new System.Collections.Generic.List<string>();
             if (hunter)
             {
-                lines.Add("近战挥击：左键点身边老师（伤害 " + ModEntry.Config.hunterDamage + "，间隔 " + ModEntry.Config.hunterAttackInterval.ToString("0.#") + "s）");
+                lines.Add("猎刀：左键挥砍面前扇形内的老师（伤害 " + ModEntry.Config.hunterDamage + "，间隔 " + ModEntry.Config.hunterAttackInterval.ToString("0.#") + "s，可群伤/空挥）");
             }
             else if (mini)
             {
@@ -265,6 +269,9 @@ namespace BioChem
             writer.WriteByte(message.Kind);
             writer.WriteULong(message.UnitUID);
             writer.WriteInt(message.Hp);
+            writer.WriteVector3(message.Origin);
+            writer.WriteVector3(message.Direction);
+            writer.WriteULong(message.AttackerUID);
         }
 
         internal static BioChemHunterMessage ReadHunter(NetworkReader reader)
@@ -273,7 +280,10 @@ namespace BioChem
             {
                 Kind = reader.ReadByte(),
                 UnitUID = reader.ReadULong(),
-                Hp = reader.ReadInt()
+                Hp = reader.ReadInt(),
+                Origin = reader.ReadVector3(),
+                Direction = reader.ReadVector3(),
+                AttackerUID = reader.ReadULong()
             };
         }
     }

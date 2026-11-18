@@ -69,15 +69,22 @@ namespace BioChem
         public Vector3 Position;
     }
 
-    /// <summary>老师猎手。Kind: 1=TransformRequest（C2S，按 G 请求变身） 2=Transform（S2C，变身广播：变大+特效）
-    /// 3=Strike（C2S，近战挥击：UnitUID=目标） 4=Hit（S2C，扣血结算：UnitUID=目标 Hp=扣血后 HP，双向——
-    /// 老师打猎手 / 猎手打老师共用） 5=RevertVisual（S2C，还原外观：猎手被感染等）</summary>
+    /// <summary>老师猎手。Kind: 1=TransformRequest（C2S，按 G 请求变身） 2=Transform（S2C，变身广播：变大+特效+发刀）
+    /// 3=Strike（C2S，挥刀上报：Origin/Direction=点击瞬间准星方向，扇形判定全在服务端，UnitUID 保留不用）
+    /// 4=Hit（S2C，扣血结算：UnitUID=目标 Hp=扣血后 HP，双向——老师打猎手 / 猎手打老师共用；
+    /// AttackerUID=猎手攻击时填攻击者（其本机已预测命中音效，跳过广播音效防双响），老师打猎手=0）
+    /// 5=RevertVisual（S2C，还原外观：猎手被感染等）
+    /// 6=Swing（S2C，挥刀广播：UnitUID=猎手，其他端驱动持刀摆动+挥砍音效；攻击者本地已预测，
+    /// 身体挥动动画走原生 PlayAnimSync 不经此消息）</summary>
     public struct BioChemHunterMessage : NetworkMessage
     {
-        public const byte TransformRequest = 1, Transform = 2, Strike = 3, Hit = 4, RevertVisual = 5;
+        public const byte TransformRequest = 1, Transform = 2, Strike = 3, Hit = 4, RevertVisual = 5, Swing = 6;
         public byte Kind;
         public ulong UnitUID;
         public int Hp;
+        public Vector3 Origin;     // Strike 用：挥刀瞬间上报位置（服务端做 5m 伪造门槛，抄原生剑击）
+        public Vector3 Direction;  // Strike 用：点击瞬间准星方向（服务端扇形判定轴，快速甩刀跟手）
+        public ulong AttackerUID;  // Hit 用：猎手攻击=攻击者 UID（本机预测过音效就不再播广播音效）
     }
 
     [Serializable]
@@ -118,9 +125,11 @@ namespace BioChem
         private static readonly Dictionary<ulong, Vector3> hunterOrigScale = new Dictionary<ulong, Vector3>();
         private static readonly Dictionary<ulong, float> hunterStrikeReadyAt = new Dictionary<ulong, float>(); // 服务端近战冷却
         private static float localHunterStrikeReadyAt;  // 客户端近战冷却
+        private static readonly List<Unit> sweepBuffer = new List<Unit>(); // 扇形扫击目标复用缓冲（服务端判定/客户端预测共用）
         private static bool hunterUnlockAnnounced;      // 解锁变身公告每局只发一次（服务端）
         internal const float HunterScale = 1.3f;        // 猎手模型放大倍数（视觉+受击盒一起变大）
-        internal const float HunterAttackRange = 2.2f;  // 猎手近战范围
+        internal const float HunterAttackRange = 2.2f;  // 猎手近战范围（水平距离）
+        internal const float HunterSlashAngle = 120f;   // 猎手挥刀扇形总角度（CF 生化近战手感：面前群体判定）
         internal const int HunterTakenDamage = 2;       // 老师剑击/小老师击晕命中猎手的扣血
         internal static uint version;
         private static float nextRepublish;
@@ -1122,7 +1131,7 @@ namespace BioChem
             if (!NetRuntime.IsServer) return;
             ulong sender = ResolveSender(connection);
             if (message.Kind == BioChemHunterMessage.TransformRequest) TryTransformHunter(sender);
-            else if (message.Kind == BioChemHunterMessage.Strike) TryHunterStrike(sender, message.UnitUID);
+            else if (message.Kind == BioChemHunterMessage.Strike) TryHunterStrike(sender, message);
         }
 
         // 按 G 变身：剩余学生 ≤ hunterTriggerStudents 时，未感染未被抓的存活学生可变身
@@ -1146,7 +1155,7 @@ namespace BioChem
         }
 
         // 各端变身表现：先入 hunters（身份翻转/物品封禁立刻生效，模型未绑定的过渡帧也不能丢身份），
-        // 再做放大+特效（模型未就绪时视觉部分跳过，快照自愈）
+        // 再做放大+特效+发刀（模型未就绪时视觉部分跳过，快照自愈/Tick 兜底）
         private static void ApplyHunterTransformLocal(BioChemHunterMessage message)
         {
             if (!UnitManager.IsSingletonActive()) return;
@@ -1159,6 +1168,7 @@ namespace BioChem
                 unit.model.gameObject.transform.localScale = unit.model.gameObject.transform.localScale * HunterScale;
             }
             unit.GetComponent<EffectComponent>()?.AddEffect(100004, 1f, Vector3.up, unit.transform, 2f);
+            HunterKnife.Ensure(unit); // 变身即发刀（各端本地建视觉；手骨未就绪时 Tick 自愈补建）
             if (message.UnitUID == UnitManager.Instance.localPlayerUID)
             {
                 localMgMode = false; // 猎手固定近战：本地连发模式清掉
@@ -1179,6 +1189,7 @@ namespace BioChem
         private static void ApplyRevertVisualLocal(BioChemHunterMessage message)
         {
             hunters.Remove(message.UnitUID);
+            HunterKnife.Remove(message.UnitUID); // 猎手身份没了，收刀（挂在手上随模型还在，但不再属于猎手）
             if (!UnitManager.IsSingletonActive()) return;
             Unit unit = UnitManager.Instance.GetUnitByUID(message.UnitUID);
             if (hunterOrigScale.TryGetValue(message.UnitUID, out Vector3 origScale))
@@ -1189,21 +1200,60 @@ namespace BioChem
             }
         }
 
-        // 猎手近战：客户端选目标上报，服务端校验距离/冷却后结算（前摇只做挥手动画，伤害即时）
-        private static void TryHunterStrike(ulong hunterUid, ulong targetUid)
+        // 猎手近战（服务端权威扇形扫击，CF 生化手感）：客户端只上报挥刀+点击瞬间准星水平方向，
+        // 服务端以权威位置为圆心做 范围×扇形 群体判定——一刀挥到几个算几个，判定跟准星走。
+        // Origin 过 5m 伪造门槛（抄原生剑击 OnTeacherSlashFire）；晕眩目标可补刀；空挥只做表现不结算
+        private static void TryHunterStrike(ulong hunterUid, BioChemHunterMessage message)
         {
             if (!enabled || !ServerClassActive() || !hunters.Contains(hunterUid)) return;
             if (Time.unscaledTime < (hunterStrikeReadyAt.TryGetValue(hunterUid, out float readyAt) ? readyAt : 0f)) return;
             if (!UnitManager.IsSingletonActive()) return;
             Unit hunter = UnitManager.Instance.GetUnitByUID(hunterUid);
-            Unit target = UnitManager.Instance.GetUnitByUID(targetUid);
             if (hunter == null || !hunter.isActived || hunter.IsDead || hunter.IsStun) return;
-            if (target == null || !target.isActived || target.IsDead || target.IsStun) return;
-            bool teacherTeam = target.UnitSubType == EUnitSubType.Teacher || infected.Contains(target.UID);
-            if (!teacherTeam || hunters.Contains(targetUid) || killedTeachers.Contains(targetUid)) return;
-            if ((target.Position - hunter.Position).sqrMagnitude > Mathf.Pow(HunterAttackRange + 0.5f, 2f)) return;
+            Vector3 origin = message.Origin;
+            if ((new Vector3(origin.x, 0f, origin.z) - new Vector3(hunter.Position.x, 0f, hunter.Position.z)).sqrMagnitude > 25f) return;
             hunterStrikeReadyAt[hunterUid] = Time.unscaledTime + Config.hunterAttackInterval;
-            DamageTeacherTeam(targetUid, Config.hunterDamage, hunterUid);
+            var swing = new BioChemHunterMessage { Kind = BioChemHunterMessage.Swing, UnitUID = hunterUid };
+            Broadcast(swing);
+            ApplyHunterSwingLocal(swing); // 房主本机（Broadcast 不含房主）；身体动画由攻击者 PlayAnimSync 原生同步
+            Vector3 forward = message.Direction;
+            forward.y = 0f;
+            if (forward.sqrMagnitude < 0.0001f) { forward = hunter.transform.forward; forward.y = 0f; }
+            forward.Normalize();
+            CollectSweepTargets(hunter, forward, sweepBuffer);
+            foreach (Unit target in sweepBuffer)
+                DamageTeacherTeam(target.UID, Config.hunterDamage, hunterUid);
+        }
+
+        // 扇形扫击目标收集（服务端判定与攻击者本地预测共用同一口径）：
+        // 老师阵营、非猎手、未出局、存活（晕眩可补刀）；水平距离 HunterAttackRange 内、
+        // 以 forward 为轴的 HunterSlashAngle 扇形内；贴脸（≈同位置）不做角度检查必中
+        private static void CollectSweepTargets(Unit hunter, Vector3 forward, List<Unit> results)
+        {
+            results.Clear();
+            float maxDistSqr = HunterAttackRange * HunterAttackRange;
+            foreach (Unit unit in UnitManager.Instance.playerList)
+            {
+                if (unit == null || !unit.isActived || unit.IsDead) continue;
+                bool teacherTeam = unit.UnitSubType == EUnitSubType.Teacher || infected.Contains(unit.UID);
+                if (!teacherTeam || hunters.Contains(unit.UID) || killedTeachers.Contains(unit.UID)) continue;
+                Vector3 to = unit.Position - hunter.Position;
+                to.y = 0f; // 水平距离判定：跳起/蹲下不影响挥刀命中
+                if (to.sqrMagnitude > maxDistSqr) continue;
+                if (to.sqrMagnitude > 0.0001f && Vector3.Angle(forward, to) > HunterSlashAngle * 0.5f) continue;
+                results.Add(unit);
+            }
+        }
+
+        // 各端挥刀表现：攻击者本地已预测（跳过），其他端摆刀 + 在猎手位置播挥砍音效
+        private static void ApplyHunterSwingLocal(BioChemHunterMessage message)
+        {
+            if (message.UnitUID == (UnitManager.IsSingletonActive() ? UnitManager.Instance.localPlayerUID : 0)) return;
+            HunterKnife.PlaySwing(message.UnitUID);
+            if (!UnitManager.IsSingletonActive()) return;
+            Unit hunter = UnitManager.Instance.GetUnitByUID(message.UnitUID);
+            if (hunter != null && hunter.isActived)
+                PlayHunterSound(AudioEvents.sfx_DoubaoSwordSwing_sfx, hunter.Position);
         }
 
         // 猎手打老师：扣 HP，归零=永久击杀（不复活）；没死走 Hit 广播同步
@@ -1217,7 +1267,7 @@ namespace BioChem
                 KillTeacher(targetUid);
                 return;
             }
-            var hit = new BioChemHunterMessage { Kind = BioChemHunterMessage.Hit, UnitUID = targetUid, Hp = newHp };
+            var hit = new BioChemHunterMessage { Kind = BioChemHunterMessage.Hit, UnitUID = targetUid, Hp = newHp, AttackerUID = attackerUid };
             Broadcast(hit);
             ApplyHunterHitLocal(hit);
         }
@@ -1250,6 +1300,9 @@ namespace BioChem
             if (unit == null || !unit.isActived) return;
             unit.GetComponent<TeacherStunComponent>()?.TryGetProjectileStun(Config.downSeconds);
             unit.GetComponent<StudentStunComponent>()?.TryGetProjectileStun(Config.downSeconds);
+            // 击杀特效：命中喷溅+电弧双重爆发（全员可见，配合永久倒地表现）
+            SingletonT<FxManager>.Instance.SpawnFx(100002, unit.Position + Vector3.up, 0uL);
+            SingletonT<FxManager>.Instance.SpawnFx(100004, unit.Position + Vector3.up, 0uL);
             NotifyAll(GetName(message.UnitUID) + " 被猎手击杀了！");
         }
 
@@ -1367,7 +1420,13 @@ namespace BioChem
             if (!UnitManager.IsSingletonActive()) return;
             Unit unit = UnitManager.Instance.GetUnitByUID(message.UnitUID);
             if (unit != null && unit.isActived)
+            {
                 SingletonT<FxManager>.Instance.SpawnFx(ConfigManager.TaserSetting.characterHitEffectID, unit.Position + Vector3.up, Vector3.zero, 0uL);
+                // 攻击者本机已在挥刀预测时即时播过命中音（AttackerUID 标记），跳过防双响；其余端正常播
+                bool selfAttacked = message.AttackerUID != 0 && message.AttackerUID == UnitManager.Instance.localPlayerUID;
+                if (!selfAttacked)
+                    PlayHunterSound(AudioEvents.sfx_DoubaoSwordHit_sfx, unit.Position); // 猎刀命中音效（复用老师剑）
+            }
             if (message.UnitUID == UnitManager.Instance.localPlayerUID)
                 NotifySelf("你被击中了！剩余 HP " + message.Hp);
         }
@@ -1442,6 +1501,7 @@ namespace BioChem
             hunterStrikeReadyAt.Clear();
             localHunterStrikeReadyAt = 0f;
             hunterUnlockAnnounced = false;
+            HunterKnife.RemoveAll(); // 猎刀随回合重置全收（模式关闭也走这里）
         }
 
         private static void OnClassStateChanged(EClassroomState state)
@@ -1469,6 +1529,7 @@ namespace BioChem
             hunters.Remove(playerUID);
             killedTeachers.Remove(playerUID);
             hunterStrikeReadyAt.Remove(playerUID);
+            HunterKnife.Remove(playerUID);
             if (hunterOrigScale.Remove(playerUID) && UnitManager.IsSingletonActive())
             {
                 Unit removedUnit = UnitManager.Instance.GetUnitByUID(playerUID);
@@ -1531,16 +1592,18 @@ namespace BioChem
             killedTeachers.Clear();
             foreach (long uid in dto.killed)
                 if (uid != 0) killedTeachers.Add((ulong)uid);
-            // 快照兜底：中途加入的端对已有猎手补放大会（幂等），出局的老师由 TickKilledTeachers 持续压躺
+            // 快照兜底：中途加入的端对已有猎手补放大+发刀（均幂等），出局的老师由 TickKilledTeachers 持续压躺
             foreach (ulong uid in new List<ulong>(hunters))
             {
-                if (hunterOrigScale.ContainsKey(uid) || !UnitManager.IsSingletonActive()) continue;
+                if (!UnitManager.IsSingletonActive()) break;
                 Unit unit = UnitManager.Instance.GetUnitByUID(uid);
-                if (unit != null && unit.isActived && unit.model != null)
+                if (unit == null || !unit.isActived || unit.model == null) continue;
+                if (!hunterOrigScale.ContainsKey(uid))
                 {
                     hunterOrigScale[uid] = unit.model.gameObject.transform.localScale;
                     unit.model.gameObject.transform.localScale = unit.model.gameObject.transform.localScale * HunterScale;
                 }
+                HunterKnife.Ensure(unit);
             }
             hp.Clear();
             for (int i = 0; i < dto.hpUids.Count && i < dto.hpVals.Count; i++)
@@ -1566,6 +1629,7 @@ namespace BioChem
             PruneSelfSlow();
             TickSelfStamina(dt);
             TickMachineGun();
+            HunterKnife.Tick(); // 挥刀驱动+自愈（无猎手时零开销早退）
             if (enabled)
             {
                 TickHunterMelee();
@@ -1710,38 +1774,69 @@ namespace BioChem
             else if (RoomManager.IsSingletonActive()) RoomManager.Instance.SendToServer(message);
         }
 
-        // 猎手近战：按住左键按 hunterAttackInterval 挥击（客户端选目标+本地冷却，服务端复验距离/冷却）
+        // 猎手近战：左键挥刀（可空挥）。本地预测表现立即生效；目标选择与结算全在服务端——
+        // 上报点击瞬间的准星方向（CF 手感核心：判定跟准星走），服务端扇形群体判定
         private static void TickHunterMelee()
         {
             if (!enabled || !hunters.Contains(UnitManager.IsSingletonActive() ? UnitManager.Instance.localPlayerUID : 0)) return;
-            if (!Input.GetMouseButtonDown(0)) return; // 单击挥击（连点受冷却限制）
+            if (!Input.GetMouseButtonDown(0)) return; // 单击挥砍（连点受冷却限制）
             if (Time.unscaledTime < localHunterStrikeReadyAt) return;
             if (!CanClassAct() || !UnitManager.IsSingletonActive()) return;
             ulong self = UnitManager.Instance.localPlayerUID;
             Unit selfUnit = UnitManager.Instance.GetUnitByUID(self);
             if (selfUnit == null || !selfUnit.isActived || selfUnit.IsDead || selfUnit.IsStun) return;
-            Unit target = FindHunterTarget(selfUnit);
-            if (target == null) return;
             localHunterStrikeReadyAt = Time.unscaledTime + Config.hunterAttackInterval;
-            selfUnit.GetComponent<AnimationComponent>()?.PlayAnimSync("Throw1");
-            var message = new BioChemHunterMessage { Kind = BioChemHunterMessage.Strike, UnitUID = target.UID };
+            selfUnit.GetComponent<AnimationComponent>()?.PlayAnimSync("Throw"); // 学生动画机有 Throw（投掷挥臂），原生同步全员可见
+            HunterKnife.PlaySwing(self); // 本地预测：自己的刀先摆（viewmodel）
+            PlayHunterSound(AudioEvents.sfx_DoubaoSwordSwing_sfx, selfUnit.Position);
+            Vector3 direction = Vector3.zero;
+            if (MonoSingletonT<SceneManager>.IsSingletonActive())
+            {
+                Camera cam = MonoSingletonT<SceneManager>.Instance.MainCamera;
+                if (cam != null) direction = cam.transform.forward;
+            }
+            PredictHunterFeedback(selfUnit, direction); // 命中反馈即时出（CF 手感核心）：预测命中+音效，伤害仍等服务端
+            var message = new BioChemHunterMessage
+            {
+                Kind = BioChemHunterMessage.Strike,
+                Origin = selfUnit.Position,
+                Direction = direction // 零向量时服务端兜底身体朝向
+            };
             if (NetRuntime.IsServer) OnServerHunter(null, message);
             else if (RoomManager.IsSingletonActive()) RoomManager.Instance.SendToServer(message);
         }
 
-        private static Unit FindHunterTarget(Unit self)
+        // 攻击者本地预测：与服务端同一口径收集扇内目标，命中标记/浮字/震屏/命中音效全部即时出。
+        // 伤害与全局表现仍走服务端广播（预测只做"手感"，不替服务端结算）
+        private static void PredictHunterFeedback(Unit hunter, Vector3 direction)
         {
-            Unit best = null;
-            float bestDist = HunterAttackRange;
-            foreach (Unit unit in UnitManager.Instance.playerList)
+            Vector3 forward = direction;
+            forward.y = 0f;
+            if (forward.sqrMagnitude < 0.0001f) { forward = hunter.transform.forward; forward.y = 0f; }
+            forward.Normalize();
+            CollectSweepTargets(hunter, forward, sweepBuffer);
+            foreach (Unit target in sweepBuffer)
             {
-                if (unit == null || !unit.isActived || unit.IsDead || unit.IsStun) continue;
-                bool teacherTeam = unit.UnitSubType == EUnitSubType.Teacher || infected.Contains(unit.UID);
-                if (!teacherTeam || hunters.Contains(unit.UID) || killedTeachers.Contains(unit.UID)) continue;
-                float dist = Vector3.Distance(self.Position, unit.Position);
-                if (dist < bestDist) { bestDist = dist; best = unit; }
+                bool killed = GetTeacherTeamHp(target.UID) <= Config.hunterDamage; // 按当前权威 HP 预测致死
+                HunterFeedback.OnPredictedHit(target, killed);
+                if (killed) PlayKillSound(target.Position);
+                else PlayHunterSound(AudioEvents.sfx_DoubaoSwordHit_sfx, target.Position);
             }
-            return best;
+        }
+
+        // 击杀音效：命中音降调加重（仅攻击者本机预测时播；其他端靠击杀广播的视觉+原生表现感知）
+        private static void PlayKillSound(Vector3 position)
+        {
+            if (!MonoSingletonT<AudioManager>.IsSingletonActive()) return;
+            MonoSingletonT<AudioManager>.Instance.PlayOneShot(AudioEvents.sfx_DoubaoSwordHit_sfx, position,
+                instance => instance.setPitch(0.75f));
+        }
+
+        // 猎刀音效复用老师剑的 FMOD 事件（挥砍 Swing / 命中 Hit）
+        internal static void PlayHunterSound(AudioEvents sound, Vector3 position)
+        {
+            if (!MonoSingletonT<AudioManager>.IsSingletonActive()) return;
+            MonoSingletonT<AudioManager>.Instance.PlayOneShot(sound, position);
         }
 
         private static void SendToggleDart()
@@ -1860,6 +1955,7 @@ namespace BioChem
             if (message.Kind == BioChemHunterMessage.Transform) ApplyHunterTransformLocal(message);
             else if (message.Kind == BioChemHunterMessage.Hit) ApplyHunterHitLocal(message);
             else if (message.Kind == BioChemHunterMessage.RevertVisual) ApplyRevertVisualLocal(message);
+            else if (message.Kind == BioChemHunterMessage.Swing) ApplyHunterSwingLocal(message);
         }
 
         // ===== 工具 =====
