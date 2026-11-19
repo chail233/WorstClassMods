@@ -11,9 +11,8 @@ namespace BioChem
     /// 核心原则：原生 Taser 管线全保留（物品/TryBuildShot/taserShots 注册表/OnTaserImpact 伤害减速/AmmoSync）——
     /// 原生单发已移除，Taser 管线只有 mod 连发在用，因此整体替换表现层不动网络与平衡：
     /// - 弹道视觉：换装 ConfigManager.TaserSetting.projectilePrefab 为本地构建的曳光弹（PlayFire 实例化/飞行/命中特效走原生）
-    /// - 枪声：Harmony prefix 拦 AudioManager.PlayOneShot(TaserFire) → FMOD CoreSystem 低级 3D 播放打包的 CC-BY 枪声
-    ///   （文件缺失时运行时合成 PCM 兜底）；本地预测与远端 MgShot 的 PlayFire 都会播，天然覆盖所有端
-    /// - 枪口起点：TryBuildShot 后 shot.origin 覆写为枪口世界坐标（服务端不校验 origin 距离），本地/远端曳光同源
+    /// - 枪声：PlayFire 生成 AK 弹体时，由 FMOD CoreSystem 以 3D 方式播放打包的枪声（文件缺失时合成 PCM）。
+    /// - 枪口起点：射击方向由当前枪口和屏幕中心射线确定，本地预测与远端曳光同源。
     /// - 弹匣：纯客户端表现层（MagSize 发打空自动换弹、R 手动换弹、AmmoSync 校准时 clamp），备弹仍是服务端权威
     /// - 模型：ModDirectory/Assets/ak47.obj（CC0，OpenGameArt Low Poly Weapon Pack）运行时解析；缺失/失败回退程序化拼装
     /// 显隐规则：嘴上挂着 Taser 物品 = 手持 AK（世界枪挂 HandPosition + 本机 viewmodel），同时 Taser 模型渲染器隐藏。
@@ -27,7 +26,8 @@ namespace BioChem
         private const float RecoilPosKick = 0.05f;   // viewmodel 后坐（沿 -Z 位移冲量）
         private const float RecoilRotKick = 7f;      // 后坐上抬角度
         private const float ModelLength = 0.9f;      // 模型归一化长度（米）
-        private const float ModelYawDeg = 0f;        // 模型朝向微调（进游戏发现枪口朝后改 180）
+        // 打包 OBJ 的枪口圆环中心，模型沿 -Z 朝前。
+        private static readonly Vector3 ObjMuzzle = new Vector3(0f, 0.010f, -0.630511f);
         // viewmodel 在相机空间的位姿（参考老师剑 idleCameraOffset (0.35, -0.38, 0.7)）
         private static readonly Vector3 ViewLocalPos = new Vector3(0.30f, -0.26f, 0.55f);
         private static readonly Vector3 ViewLocalEuler = new Vector3(3f, 4f, 0f);
@@ -106,16 +106,9 @@ namespace BioChem
             if (reloading && ModEntry.SelfDartAmmo <= 0) reloading = false;
         }
 
-        /// <summary>当前枪口世界坐标（曳光/枪声/口焰的起点；viewmodel 未就绪时退回相机前方）。</summary>
-        internal static Vector3 GetMuzzleWorldPos()
+        internal static Vector3 GetMuzzleWorldPos(Vector3 fallback)
         {
-            if (viewMuzzle != null) return viewMuzzle.position;
-            if (MonoSingletonT<SceneManager>.IsSingletonActive())
-            {
-                Camera camera = MonoSingletonT<SceneManager>.Instance.MainCamera;
-                if (camera != null) return camera.transform.position + camera.transform.forward * 0.5f;
-            }
-            return Vector3.zero;
+            return viewMuzzle != null ? viewMuzzle.position : fallback;
         }
 
         /// <summary>回合重置/模式关闭：全收。玩家单位跨局存活，世界枪必须显式销毁（只清注册表会让枪一直挂在手上，重新装备时重复堆积）。</summary>
@@ -186,25 +179,32 @@ namespace BioChem
             }
         }
 
-        /// <summary>枪声播放入口（PlayOneShot 抑制 patch 调用；位置=弹道 origin=枪口）。</summary>
-        internal static void PlayShotAt(Vector3 position)
+        internal static bool TryPlayShotAt(Vector3 position)
         {
             TryLoadShotSound();
-            if (!soundReady) return;
-            if (RuntimeManager.CoreSystem.playSound(shotSound, default(ChannelGroup), true, out Channel channel) != RESULT.OK) return;
-            VECTOR pos = new VECTOR { x = position.x, y = position.y, z = position.z };
-            VECTOR vel = default(VECTOR);
-            channel.set3DAttributes(ref pos, ref vel);
-            channel.set3DMinMaxDistance(3f, 60f);
-            channel.setVolume(0.6f);
-            channel.setPaused(false);
-        }
+            if (!soundReady) return false;
+            try
+            {
+                AudioManager audio = MonoSingletonT<AudioManager>.Instance;
+                float volume = 0.6f * audio._mainVolum * audio.GetSFXVolume();
+                if (RuntimeManager.CoreSystem.playSound(shotSound, default(ChannelGroup), true, out Channel channel) != RESULT.OK)
+                    return false;
+                VECTOR pos = new VECTOR { x = position.x, y = position.y, z = position.z };
+                VECTOR vel = default(VECTOR);
+                if (channel.set3DAttributes(ref pos, ref vel) == RESULT.OK
+                    && channel.set3DMinMaxDistance(3f, 60f) == RESULT.OK
+                    && channel.setVolume(volume) == RESULT.OK
+                    && channel.setPaused(false) == RESULT.OK)
+                    return true;
 
-        /// <summary>PlayOneShot(TaserFire) 抑制：换成本包 AK 枪声（Harmony prefix）。</summary>
-        public static bool SuppressTaserFireSound(AudioEvents eventName)
-        {
-            if (eventName != AudioEvents.sfx_TaserFire_sfx) return true;
-            return false; // 原生"啾"声吞掉（PlayFire 顺带经此 patch 播 AK 枪声）
+                channel.stop();
+                return false;
+            }
+            catch (System.Exception e)
+            {
+                ModEntry.Log?.Invoke("[状态] AK47 枪声播放异常：" + e.Message);
+                return false;
+            }
         }
 
         // ===== 每帧 =====
@@ -441,7 +441,7 @@ namespace BioChem
         }
 
         // 运行时 OBJ 解析：v/vt/vn/f（多边形 fan 三角化、负索引支持），忽略材质/分组；
-        // 加载后归一化：最长轴旋到 +Z、总长缩到 ModelLength、包围盒中心移到原点（握点=原点由局部位姿常数调）
+        // 加载后归一化：枪口旋到 +Z、总长缩到 ModelLength、包围盒中心移到原点。
         private static Transform LoadObjTemplate(string path)
         {
             var positions = new List<Vector3>();
@@ -507,7 +507,7 @@ namespace BioChem
             if (!hasNormal) mesh.RecalculateNormals();
             if (!hasUv) mesh.uv = new Vector2[mesh.vertexCount];
             mesh.RecalculateBounds();
-            NormalizeMesh(mesh);
+            Vector3 muzzlePosition = NormalizeMesh(mesh);
 
             var root = new GameObject("Ak47Model");
             var child = new GameObject("mesh");
@@ -516,43 +516,25 @@ namespace BioChem
             child.AddComponent<MeshRenderer>().sharedMaterial = Tint(new Color(0.18f, 0.17f, 0.16f), 0.45f); // 枪灰金属
             var muzzle = new GameObject("muzzle");
             muzzle.transform.SetParent(root.transform, false);
-            muzzle.transform.localPosition = new Vector3(0f, 0f, mesh.bounds.max.z); // 归一化后枪口=+Z 末端
+            muzzle.transform.localPosition = muzzlePosition;
             return root.transform;
         }
 
-        private static void NormalizeMesh(Mesh mesh)
+        private static Vector3 NormalizeMesh(Mesh mesh)
         {
             var verts = mesh.vertices;
+            var normals = mesh.normals;
             var bounds = mesh.bounds;
-            var size = bounds.size;
-            // 最长轴旋到 +Z（建模轴向未知：Blender 导出常见 X/Y 朝向）
-            if (size.x >= size.z && size.x >= size.y)
-            {
-                for (int i = 0; i < verts.Length; i++) verts[i] = new Vector3(-verts[i].z, verts[i].y, verts[i].x); // +X→+Z
-            }
-            else if (size.y >= size.z && size.y >= size.x)
-            {
-                for (int i = 0; i < verts.Length; i++) verts[i] = new Vector3(verts[i].x, -verts[i].z, verts[i].y); // +Y→+Z
-            }
-            mesh.vertices = verts;
-            mesh.RecalculateBounds();
-            bounds = mesh.bounds;
+            Quaternion modelRotation = Quaternion.Euler(0f, 180f, 0f);
             float scale = ModelLength / Mathf.Max(0.01f, bounds.size.z);
-            var center = bounds.center;
             for (int i = 0; i < verts.Length; i++)
-                verts[i] = new Vector3((verts[i].x - center.x) * scale, (verts[i].y - center.y) * scale, (verts[i].z - center.z) * scale);
+                verts[i] = modelRotation * ((verts[i] - bounds.center) * scale);
+            for (int i = 0; i < normals.Length; i++)
+                normals[i] = modelRotation * normals[i];
             mesh.vertices = verts;
+            mesh.normals = normals;
             mesh.RecalculateBounds();
-            if (Mathf.Abs(ModelYawDeg) > 0.01f) // 朝向实测反了时改 ModelYawDeg（绕 Y 旋转后枪口仍在 +Z 末端）
-            {
-                var rotated = mesh.vertices;
-                float rad = ModelYawDeg * Mathf.Deg2Rad;
-                float cos = Mathf.Cos(rad), sin = Mathf.Sin(rad);
-                for (int i = 0; i < rotated.Length; i++)
-                    rotated[i] = new Vector3(rotated[i].x * cos + rotated[i].z * sin, rotated[i].y, -rotated[i].x * sin + rotated[i].z * cos);
-                mesh.vertices = rotated;
-                mesh.RecalculateBounds();
-            }
+            return modelRotation * ((ObjMuzzle - bounds.center) * scale);
         }
 
         // 程序化兜底 AK：机匣/枪管/导气管/准星/木护木/斜弹匣/握把/枪托，枪口 +Z 前方

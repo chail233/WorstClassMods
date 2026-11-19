@@ -298,6 +298,8 @@ namespace BioChem
 
         private static readonly NumField[] NumFields =
         {
+            new NumField { Label="开局感染人数", Step=1, Min=0, Max=BioChemConfig.MaxInitialInfectedStudents, Int=true,
+                Get=()=>ModEntry.Config.initialInfectedStudents, Set=v=>ModEntry.Config.initialInfectedStudents=Mathf.RoundToInt(v) },
             new NumField { Label="挂柱感染(秒)", Step=1, Min=1, Max=600, Int=true,
                 Get=()=>ModEntry.Config.pillarInfectSeconds, Set=v=>ModEntry.Config.pillarInfectSeconds=Mathf.RoundToInt(v) },
             new NumField { Label="大老师HP", Step=1, Min=1, Max=999, Int=true,
@@ -351,13 +353,13 @@ namespace BioChem
         private static float BuildGrid(Transform parent, float innerW, float bodyH)
         {
             float cellW = (innerW - 12f) / 2f;
-            // 12 行：窗口偏矮时行高压缩到 26px 起步，避免压到关闭按钮（24 项数值正好排满两列十二行）
-            float rowH = Mathf.Clamp(bodyH / 12f, 26f, 40f);
+            int rows = (NumFields.Length + 1) / 2;
+            float rowH = Mathf.Clamp(bodyH / rows, 24f, 40f);
             int labelSize = Mathf.Max(15, baseFontSize - 5);
             for (int i = 0; i < NumFields.Length; i++)
             {
                 NumField f = NumFields[i];
-                int col = i / 12, row = i % 12;
+                int col = i / rows, row = i % rows;
                 var cell = new GameObject("数值_" + f.Label, typeof(RectTransform));
                 cell.transform.SetParent(parent, false);
                 float x = -innerW / 2f + col * (cellW + 12f);
@@ -380,7 +382,7 @@ namespace BioChem
                     () => Adjust(f, f.Step));
                 Place(f.PlusBtn.GetComponent<RectTransform>(), new Vector2(0f, 1f), new Vector2(0f, 1f), new Vector2(24f, rowH - 8f), new Vector2(cellW - 28f, 0f));
             }
-            return 12f * rowH;
+            return rows * rowH;
         }
 
         private static void Adjust(NumField f, float delta)
@@ -404,10 +406,14 @@ namespace BioChem
                     + "%，当前已感染 " + ModEntry.infected.Count + " 人 → 加成 +" + (bonus * 100f).ToString("0") + "%）"
                 : "命中 -" + c.dartDamage + " HP";
             return "规则：\n" +
+                (c.initialInfectedStudents > 0
+                    ? "· 上课时随机感染最多 " + c.initialInfectedStudents + " 名真人学生，至少留一名未感染学生\n"
+                    : "· 开局感染已关闭\n") +
                 "· 老师把真人学生挂上罚站柱超过 " + c.pillarInfectSeconds.ToString("0") + " 秒，自动释放并感染为小老师\n" +
                 "· 小老师：学生功能禁用（看不到其他玩家 ID）、捣蛋不计分；HP " + c.miniMaxHp + "，写板书长按读条缓慢回体力，走路每秒耗 " + c.staminaDrainPerSecond.ToString("0.#") + " 体力\n" +
                 "· 小老师按 F 击晕身边学生 " + c.miniStunSeconds.ToString("0.#") + " 秒：耗体力 " + c.staminaCostPerStun.ToString("0.#") + "、冷却 " + c.miniStunCooldownSeconds.ToString("0.#") + " 秒、距离 " + c.miniStunRange.ToString("0.#") + " 米，体力不足无法击晕\n" +
                 "· 大老师 HP " + c.teacherMaxHp + "，写板书回复 " + c.teacherHpPerWrite + " HP；HP 归零晕倒 " + c.downSeconds.ToString("0") + " 秒后从办公室复活并刷新状态\n" +
+                "· 老师挂起真人学生升一阶，每局最多 " + ModEntry.MaxEvolutionStage + " 阶。每阶增加基础生命上限的 " + ModEntry.EvolutionHpPercentPerStage + "%（向上取整），回满生命和体力，清除吹箭减速。复活保留阶段\n" +
                 "· 学生按 1 掏出/收起连发吹箭筒（嘴部叼持，右键瞄准）：按住左键每 " + c.fireInterval.ToString("0.#") + " 秒射一支，" + dartDamageText + "；每层减速 " + (c.dartSlowPerStack * 100f).ToString("0") + "%（持续 " + c.dartSlowSeconds.ToString("0.#") + " 秒，最多 " + c.dartSlowMaxStacks + " 层）；无眩晕，打中学生无效\n" +
                 "· 吹箭备弹 " + c.dartMaxAmmo + " 发（新一局自动回满），耗尽后无法射击" + (c.dartAmmoPerFood > 0 ? "；吃完一份食物补 " + c.dartAmmoPerFood + " 发（火锅食材也计入）" : "") + "\n" +
                 "· 生化胜负：捣蛋值整体不生效（捣蛋进度、学生捣蛋胜利、机制奖励全部冻结）；倒计时结束=幸存学生获胜，老师队伍在倒计时内抓完全部学生则老师获胜\n" +

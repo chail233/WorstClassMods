@@ -7,6 +7,9 @@ namespace BioChem
     [Serializable]
     public class BioChemConfig
     {
+        internal const int MaxInitialInfectedStudents = 50;
+
+        public int initialInfectedStudents = 1;  // 正式上课时随机感染的人数，0 = 关闭
         public float pillarInfectSeconds = 10f;   // 挂柱多久后被感染（CF 节奏：抓到很快滚雪球）
         public int teacherMaxHp = 90;             // 大老师 HP
         public int teacherHpPerWrite = 9;         // 大老师每次写完板书回复 HP（上限高了回复量配套上调）
@@ -43,8 +46,9 @@ namespace BioChem
                 s_ConfigPath = Path.Combine(configDir, "biochem.json");
                 if (File.Exists(s_ConfigPath))
                 {
-                    var loaded = JsonUtility.FromJson<BioChemConfig>(File.ReadAllText(s_ConfigPath));
-                    if (loaded != null) config = loaded;
+                    var loaded = new BioChemConfig();
+                    JsonUtility.FromJsonOverwrite(File.ReadAllText(s_ConfigPath), loaded);
+                    config = loaded;
                 }
                 else
                 {
@@ -77,6 +81,7 @@ namespace BioChem
         // 数值边界。Load / 面板编辑 / 客机应用房主数值后都要走一遍
         public void Clamp()
         {
+            initialInfectedStudents = Mathf.Clamp(initialInfectedStudents, 0, MaxInitialInfectedStudents);
             pillarInfectSeconds = Mathf.Max(1f, pillarInfectSeconds);
             teacherMaxHp = Mathf.Max(1, teacherMaxHp);
             teacherHpPerWrite = Mathf.Max(0, teacherHpPerWrite);

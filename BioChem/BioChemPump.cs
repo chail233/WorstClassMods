@@ -70,6 +70,9 @@ namespace BioChem
             else if (self.IsStudent) { identity = "身份：学生"; }
             else return; // 观战等非师生状态不画
 
+            if (!hunter && (big || mini))
+                identity += " · 进化 " + ModEntry.GetEvolutionStage(self.UID) + "/" + ModEntry.MaxEvolutionStage + " 阶";
+
             var lines = new System.Collections.Generic.List<string>();
             if (hunter)
             {
@@ -145,13 +148,14 @@ namespace BioChem
             float cy = y + topPad + identityHeight + gap;
             if (hunter)
                 DrawBar(x, cy, width, barHeight, ModEntry.GetHunterHp(self.UID), ModEntry.Config.hunterHp, "HP", new Color(0.85f, 0.2f, 0.2f));
-            else if (big)
-                DrawBar(x, cy, width, barHeight, ModEntry.GetHp(self.UID, true), ModEntry.Config.teacherMaxHp, "HP", new Color(0.85f, 0.2f, 0.2f));
-            else if (mini)
+            else if (big || mini)
             {
-                DrawBar(x, cy, width, barHeight, ModEntry.GetHp(self.UID, false), ModEntry.Config.miniMaxHp, "HP", new Color(0.85f, 0.2f, 0.2f));
-                cy += barHeight + gap;
-                DrawBar(x, cy, width, barHeight, ModEntry.SelfStamina(), ModEntry.Config.staminaMax, "体力", new Color(0.25f, 0.75f, 0.3f));
+                DrawBar(x, cy, width, barHeight, ModEntry.GetHp(self.UID, big), ModEntry.GetTeacherMaxHp(self.UID, big), "HP", new Color(0.85f, 0.2f, 0.2f));
+                if (mini)
+                {
+                    cy += barHeight + gap;
+                    DrawBar(x, cy, width, barHeight, ModEntry.SelfStamina(), ModEntry.Config.staminaMax, "体力", new Color(0.25f, 0.75f, 0.3f));
+                }
             }
             cy += bars * barHeight + Mathf.Max(0, bars - 1) * gap;
             foreach (string line in lines)
