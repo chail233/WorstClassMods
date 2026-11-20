@@ -48,8 +48,9 @@ namespace BioChem
         private static Quaternion viewRestRot;
         private static Vector3 viewRestPos;
         private static float recoilPos, recoilRot, flashUntil;
-        private static bool equipped;            // 本地玩家嘴上挂着 Taser
+        private static bool equipped;            // 本地玩家选中主武器且已同步挂载
         private static int mag;
+        private static bool magInitialized;
         private static bool reloading;
         private static float reloadDoneAt;
         private static float worldScanAt;
@@ -120,6 +121,7 @@ namespace BioChem
             HideViewmodel();
             equipped = false;
             mag = 0;
+            magInitialized = false;
             reloading = false;
         }
 
@@ -211,27 +213,30 @@ namespace BioChem
 
         internal static void Tick()
         {
-            TrySwapTracerPrefab();
             if (!ModEntry.enabled || !UnitManager.IsSingletonActive())
             {
-                if (worldGuns.Count > 0) ResetForNewRound();
+                if (worldGuns.Count > 0 || magInitialized) ResetForNewRound();
                 return;
             }
+            TrySwapTracerPrefab();
             float now = Time.unscaledTime;
-            // 本地装备检测（嘴上挂 Taser = 持 AK）
-            Unit self = UnitManager.Instance.GetUnitByUID(UnitManager.Instance.localPlayerUID);
-            bool hasTaser = MouthHasTaser(self);
-            if (hasTaser != equipped)
+            Unit self = UnitManager.Instance.localPlayer;
+            Unit mouthItem = self?.GetComponent<MouthItemUseComponent>()?.currentMouthItem;
+            bool holdingAk = StudentWeapons.Selected == StudentWeaponSlot.Primary && StudentWeapons.CanSelect(self)
+                && StudentWeapons.IsLocalAk(mouthItem) && mouthItem.isActived;
+            if (holdingAk != equipped)
             {
-                equipped = hasTaser;
-                if (equipped)
+                equipped = holdingAk;
+                if (equipped && !magInitialized)
                 {
-                    mag = Mathf.Min(MagSize, ModEntry.SelfDartAmmo); // 上膛：弹匣从备弹装满
-                    reloading = false;
+                    mag = Mathf.Min(MagSize, ModEntry.SelfDartAmmo);
+                    magInitialized = true;
                 }
-                else
+                if (!equipped)
                 {
+                    // 切槽取消正在进行的换弹，保留弹匣余量。
                     reloading = false;
+                    if (StudentWeapons.IsLocalAk(mouthItem)) mouthItem.GetComponent<TaserComponent>()?.OnStopHeld(self);
                     HideViewmodel();
                 }
             }
@@ -263,7 +268,7 @@ namespace BioChem
             foreach (Unit unit in UnitManager.Instance.playerList)
             {
                 if (unit == null || !unit.isActived) continue;
-                bool hasTaser = MouthHasTaser(unit);
+                bool hasTaser = unit.isLocalPlayer ? equipped : MouthHasTaser(unit);
                 if (hasTaser)
                 {
                     EnsureWorldGun(unit);

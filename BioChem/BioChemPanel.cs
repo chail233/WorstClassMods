@@ -414,7 +414,8 @@ namespace BioChem
                 "· 小老师按 F 击晕身边学生 " + c.miniStunSeconds.ToString("0.#") + " 秒：耗体力 " + c.staminaCostPerStun.ToString("0.#") + "、冷却 " + c.miniStunCooldownSeconds.ToString("0.#") + " 秒、距离 " + c.miniStunRange.ToString("0.#") + " 米，体力不足无法击晕\n" +
                 "· 大老师 HP " + c.teacherMaxHp + "，写板书回复 " + c.teacherHpPerWrite + " HP；HP 归零晕倒 " + c.downSeconds.ToString("0") + " 秒后从办公室复活并刷新状态\n" +
                 "· 老师挂起真人学生升一阶，每局最多 " + ModEntry.MaxEvolutionStage + " 阶。每阶增加基础生命上限的 " + ModEntry.EvolutionHpPercentPerStage + "%（向上取整），回满生命和体力，清除吹箭减速。复活保留阶段\n" +
-                "· 学生按 1 掏出/收起连发吹箭筒（嘴部叼持，右键瞄准）：按住左键每 " + c.fireInterval.ToString("0.#") + " 秒射一支，" + dartDamageText + "；每层减速 " + (c.dartSlowPerStack * 100f).ToString("0") + "%（持续 " + c.dartSlowSeconds.ToString("0.#") + " 秒，最多 " + c.dartSlowMaxStacks + " 层）；无眩晕，打中学生无效\n" +
+                "· 学生按 1/2/3/4 切换主武器、副武器、近战和投掷物。主武器是 AK47，其余栏位暂空，切到空栏会收枪\n" +
+                "· AK47 右键瞄准，按住左键每 " + c.fireInterval.ToString("0.#") + " 秒射击一次，R 换弹。" + dartDamageText + "；每层减速 " + (c.dartSlowPerStack * 100f).ToString("0") + "%（持续 " + c.dartSlowSeconds.ToString("0.#") + " 秒，最多 " + c.dartSlowMaxStacks + " 层）；无眩晕，打中学生无效\n" +
                 "· 吹箭备弹 " + c.dartMaxAmmo + " 发（新一局自动回满），耗尽后无法射击" + (c.dartAmmoPerFood > 0 ? "；吃完一份食物补 " + c.dartAmmoPerFood + " 发（火锅食材也计入）" : "") + "\n" +
                 "· 生化胜负：捣蛋值整体不生效（捣蛋进度、学生捣蛋胜利、机制奖励全部冻结）；倒计时结束=幸存学生获胜，老师队伍在倒计时内抓完全部学生则老师获胜\n" +
                 "· 老师猎手：剩余学生 ≤ " + c.hunterTriggerStudents + " 人时学生按 G 变身（变大+特效，HP " + c.hunterHp + "）；近战左键挥击伤害 " + c.hunterDamage + "（间隔 " + c.hunterAttackInterval.ToString("0.#") + "s、范围 2.2m）；被老师剑击/小老师击晕命中扣 2 HP，HP 清零直接感染；猎手击杀的老师永久出局不复活，老师全灭=学生立即获胜\n" +

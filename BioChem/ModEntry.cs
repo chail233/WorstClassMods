@@ -19,8 +19,7 @@ namespace BioChem
     }
 
     /// <summary>
-    /// Kind: 1=Toggle（C2S，按 1 掏出/收起连发吹箭筒）
-    /// 2=Hit（S2C，原生吹箭命中的生化结算：扣血+减速；弹道/音效表现走游戏原生 ApplyHit）
+    /// Kind: 2=Hit（S2C，原生吹箭命中的生化结算：扣血+减速；弹道/音效表现走游戏原生 ApplyHit）
     /// 3=MgFire（C2S，连发吹箭的一发：带弹道参数，服务端注册 taserShots 后广播）
     /// 4=MgShot（S2C，连发吹箭的弹体广播：各端 TaserProjectile.PlayFire 渲染，射手自己跳过——本地已预测渲染）
     /// 5=AmmoSync（S2C，备弹同步：TargetUID=学生 TargetHp=剩余备弹；射击扣减/掏出/吃东西补弹后广播）
@@ -29,7 +28,7 @@ namespace BioChem
     /// </summary>
     public struct BioChemDartMessage : NetworkMessage
     {
-        public const byte Toggle = 1, Hit = 2, MgFire = 3, MgShot = 4, AmmoSync = 5, EatRefill = 6;
+        public const byte Hit = 2, MgFire = 3, MgShot = 4, AmmoSync = 5, EatRefill = 6;
         public byte Kind;
         public ulong TargetUID;    // Hit=目标玩家 / MgFire·MgShot=虚拟弹体 UID
         public int TargetHp;       // Hit 用
@@ -108,7 +107,6 @@ namespace BioChem
         internal static Action<string> Log;
 
         internal static readonly KeyCode StunKey = KeyCode.F;       // 小老师击晕
-        internal const KeyCode DartKey = KeyCode.Alpha1;            // 学生按 1 掏出/收起连发吹箭筒（按住左键连发）
         internal const KeyCode PanelKey = KeyCode.F7;               // 管理面板开关
         private const string HarmonyId = "worstclass.biochem";
         private const int ClassStateChangedMsgId = 301;
@@ -150,8 +148,7 @@ namespace BioChem
         // 吹箭减速层数（服务端计数，广播层数给目标端做本地衰减）
         private static readonly Dictionary<ulong, List<float>> serverSlowExpiries = new Dictionary<ulong, List<float>>();
 
-        // ===== 吹箭筒：原生 Taser 物品，按 1 掏出/收起（服务端结算），备弹制 =====
-        // 一发一物原生消耗（打光那把原生管线自动回收）；收起即回收，再按 1 随时补掏
+        // ===== 主武器 AK47：以原生 Taser 物品承载挂载和弹道，备弹由服务端管理 =====
         private static int taserItemId = -1;
         private static readonly Dictionary<ulong, ulong> issuedTaser = new Dictionary<ulong, ulong>(); // 学生 UID → 已掏出的 Taser 物品 UID
         // 挂载重试：物品模型异步加载完成后嘴部挂点才存在，逐帧重试 TryEquipMouthItem
@@ -180,12 +177,10 @@ namespace BioChem
         private static readonly MethodInfo TeacherClearStunMethod =
             AccessTools.Method(typeof(TeacherStunComponent), "ClearStun");
 
-        // ===== 连发吹箭筒（按 2）：同一原生 Taser 物品，mod 接管开火 =====
+        // ===== AK47 连发 =====
         // 原生吹箭一发一物（TryConsumeShot 消耗+回收），连发靠抑制原生单击开火 + 定时造弹：
         // 原生 TryBuildShot 提供弹体参数，AK 枪口和屏幕准星确定弹道 → PlayFire 本地渲染 → C2S MgFire →
         // 服务端反射写原生 taserShots 注册表 → 命中走原生 OnTaserImpact（眩晕/音效/Hit 广播原样生效）
-        internal static bool LocalMachineGun => localMgMode;
-        private static bool localMgMode;         // 本地玩家连发模式（客户端权威，服务端只按"嘴上挂着吹箭"校验）
         private static float mgNextFireAt;       // 连发下次可射击时间（本地节流）
         private static uint mgShotSeq;           // 虚拟弹体 UID 序号
         private const ulong VirtualShotUidBase = 0x6000000000000000UL; // 虚拟弹体 UID 高位标记（真实 UID 远小于此）
@@ -286,6 +281,8 @@ namespace BioChem
                 Reader<BioChemStateMessage>.read = BioChemPump.ReadState;
                 Writer<BioChemDartMessage>.write = BioChemPump.WriteDart;
                 Reader<BioChemDartMessage>.read = BioChemPump.ReadDart;
+                Writer<BioChemWeaponSlotMessage>.write = BioChemPump.WriteWeaponSlot;
+                Reader<BioChemWeaponSlotMessage>.read = BioChemPump.ReadWeaponSlot;
                 Writer<BioChemStunMessage>.write = BioChemPump.WriteStun;
                 Reader<BioChemStunMessage>.read = BioChemPump.ReadStun;
                 Writer<BioChemWriteMessage>.write = BioChemPump.WriteWrite;
@@ -466,7 +463,7 @@ namespace BioChem
             if (!infected.Add(uid)) return false;
             hp[uid] = GetTeacherMaxHp(uid, false);
             stamina[uid] = Config.staminaMax;
-            RevokeTaser(uid); // 被感染即失去吹箭筒
+            StudentWeapons.RemovePlayer(uid);
             MiniTeacherCatch.EnsureCatchAbility(uid); // 感染即补挂原生 CatchComponent（抓取/挂柱能力）
             if (UnitManager.IsSingletonActive() && uid == UnitManager.Instance.localPlayerUID)
             {
@@ -528,14 +525,12 @@ namespace BioChem
             BroadcastState();
         }
 
-        // ===== 吹箭筒：原生 Taser 物品，按 1 掏出/收起（服务端结算） =====
+        // ===== 连发与补弹请求 =====
 
-        // C2S：按 1 掏出收起 + 连发吹箭的一发 + 吃完食物补弹上报
         private static void OnServerDart(NetworkConnectionToClient connection, BioChemDartMessage message)
         {
             if (!NetRuntime.IsServer) return;
-            if (message.Kind == BioChemDartMessage.Toggle) ToggleDart(ResolveSender(connection));
-            else if (message.Kind == BioChemDartMessage.MgFire) OnServerMgFire(connection, message);
+            if (message.Kind == BioChemDartMessage.MgFire) OnServerMgFire(connection, message);
             else if (message.Kind == BioChemDartMessage.EatRefill) OnServerEatRefill(connection);
         }
 
@@ -583,51 +578,44 @@ namespace BioChem
             Log("[状态] " + GetName(sender) + " 吃东西补充吹箭弹药至 " + dartAmmo[sender] + "/" + Config.dartMaxAmmo);
         }
 
-        private static void ToggleDart(ulong uid)
+        internal static ulong EnsureAkEquipped(Unit student)
         {
-            if (!enabled || !UnitManager.IsSingletonActive()) return;
-            if (infected.Contains(uid) || hunters.Contains(uid)) return; // 感染者/猎手没有吹箭筒（猎手固定近战）
-            Unit student = UnitManager.Instance.GetUnitByUID(uid);
-            if (student == null || !student.isActived || student.IsDead || !student.IsStudent) return;
-            BroadcastAmmo(uid); // 掏出/收起都同步一次备弹（未记录过则懒初始化为满）
-
+            ulong uid = student.UID;
+            var mouth = student.GetComponent<MouthItemUseComponent>();
+            if (mouth == null) return 0;
             if (issuedTaser.TryGetValue(uid, out ulong itemUid))
             {
                 Unit item = UnitManager.Instance.GetUnitByUID(itemUid);
-                issuedTaser.Remove(uid);
-                pendingEquip.Remove(itemUid);
-                if (item != null && item.isActived)
-                {
-                    item.SyncBack();
-                    Log("[状态] " + GetName(uid) + " 收起吹箭筒");
-                    return;
-                }
-                Log("[状态] " + GetName(uid) + " 的吹箭已打光，补掏一把");
-                // 打光那把已被原生管线回收 → 落到下方掏出
+                var mount = item?.GetData<RoleData>()?.NetData.MountingPointNet ?? default;
+                if (item != null && item.isActived && (pendingEquip.ContainsKey(itemUid) || mouth.currentMouthItem == item
+                    || (mount.HaveValue && mount.MountingUID == uid && mount.MountingPoint == EUnitPartType.Mouth)))
+                    return itemUid;
+                RevokeTaser(uid);
             }
+
+            if (mouth.currentMouthItem != null) return 0;
 
             int id = TaserItemId();
             if (id <= 0)
             {
                 Log("找不到吹箭筒物品配置（SubType=613 MountPos=15）");
-                return;
+                return 0;
             }
             try
             {
-                var mouth = student.GetComponent<MouthItemUseComponent>();
-                if (mouth == null) { Log("[状态] 掏出失败：" + GetName(uid) + " 无嘴部物品组件"); return; }
-                if (mouth.currentMouthItem != null) { Log("[状态] 掏出失败：嘴部被其他物品占用"); return; }
                 Unit item = UnitManager.Instance.CreateCommonUnitDirectly(id, student.Position + Vector3.up);
-                if (item == null) { Log("[状态] 掏出失败：物品创建失败"); return; }
+                if (item == null) return 0;
                 issuedTaser[uid] = item.UID;
-                // 模型异步加载，嘴部挂点就绪前 TryEquipMouthItem 必失败 → 逐帧重试
+                // 先向持有者确认物品 UID，再由 Tick 挂载，避免挂载和确认之间走原生单发。
                 pendingEquip[item.UID] = (uid, Time.unscaledTime + 5f);
-                TickDartEquipOnce(item.UID, student);
+                BroadcastAmmo(uid);
+                return item.UID;
             }
             catch (Exception e)
             {
-                if (issuedTaser.Remove(uid, out ulong orphan)) pendingEquip.Remove(orphan);
-                Log("掏出吹箭筒失败：" + e.Message);
+                RevokeTaser(uid);
+                Log("装备 AK47 失败：" + e.Message);
+                return 0;
             }
         }
 
@@ -636,26 +624,22 @@ namespace BioChem
         {
             if (pendingEquip.Count == 0) return;
             foreach (ulong uid in new List<ulong>(pendingEquip.Keys))
-                TickDartEquipOnce(uid, null);
+                TickDartEquipOnce(uid);
         }
 
-        private static void TickDartEquipOnce(ulong uid, Unit studentHint)
+        private static void TickDartEquipOnce(ulong uid)
         {
             if (!pendingEquip.TryGetValue(uid, out var entry) || !UnitManager.IsSingletonActive()) return;
-            Unit student = studentHint != null && studentHint.isActived ? studentHint : UnitManager.Instance.GetUnitByUID(entry.student);
+            Unit student = UnitManager.Instance.GetUnitByUID(entry.student);
             Unit item = UnitManager.Instance.GetUnitByUID(uid);
-            if (student == null || item == null || !item.isActived || !student.isActived || student.IsDead)
+            if (!StudentWeapons.CanSelect(student) || item == null || !item.isActived)
             {
-                pendingEquip.Remove(uid);
-                issuedTaser.Remove(entry.student);
-                if (item != null && item.isActived) item.SyncBack();
+                RevokeTaser(entry.student);
                 return;
             }
             if (Time.unscaledTime > entry.deadline)
             {
-                pendingEquip.Remove(uid);
-                issuedTaser.Remove(entry.student);
-                item.SyncBack();
+                RevokeTaser(entry.student);
                 Log("[状态] " + GetName(entry.student) + " 吹箭筒挂载超时，已回收");
                 return;
             }
@@ -685,37 +669,38 @@ namespace BioChem
             return -1;
         }
 
-        // 回收某学生的吹箭筒（感染 / 关模式 / 玩家下线时）
-        private static void RevokeTaser(ulong uid)
+        // 收起 AK47，同时取消模型尚未加载完成的挂载。
+        internal static void RevokeTaser(ulong uid)
         {
             if (issuedTaser.Remove(uid, out ulong itemUid))
             {
                 pendingEquip.Remove(itemUid);
-                if (UnitManager.IsSingletonActive())
+                if (UnitManager.IsSingletonActive() && RoomManager.IsSingletonActive())
                 {
                     Unit item = UnitManager.Instance.GetUnitByUID(itemUid);
-                    if (item != null && item.isActived) item.SyncBack();
+                    // 原生服务端销毁入口会先在房主端解绑，再通知客机，快速切回主武器时嘴部已空出。
+                    if (item != null && item.isActived)
+                        RoomManager.Instance.GetUnitMessageHandler().OnUnitDestroyMessageRequest(null,
+                            new UnitDestroyMessageRequest_C2S { unitUID = itemUid });
                 }
             }
         }
 
-        // ===== 连发吹箭筒（按 2）：客户端造弹循环 =====
+        // ===== AK47 客户端造弹循环 =====
 
         // 本地玩家按住左键连发：构造准星弹道，按虚拟 UID 本地渲染 + C2S 上报。
         // 射手自己不发 S2C 回包（本地已预测渲染），服务端广播给其他端渲染
         private static void TickMachineGun()
         {
-            if (!localMgMode || !enabled) return;
+            if (!enabled || StudentWeapons.Selected != StudentWeaponSlot.Primary || !CanClassAct()) return;
             if (!Input.GetMouseButton(0)) return; // 按住左键
             if (Ak47Weapon.BlockFire()) return;   // 换弹中/空匣不发（空匣且还有备弹时按住扳机自动换弹）
             if (Time.unscaledTime < mgNextFireAt) return;
             if (selfDartAmmo <= 0) return; // 备弹耗尽（服务端 AmmoSync 权威校准，本地先扣保证手感）
-            if (!CanClassAct()) return;
-            if (!UnitManager.IsSingletonActive()) return;
-            Unit self = UnitManager.Instance.GetUnitByUID(UnitManager.Instance.localPlayerUID);
-            if (self == null || !self.isActived || self.IsDead || self.IsStun) return;
+            Unit self = UnitManager.Instance.localPlayer;
+            if (!StudentWeapons.CanSelect(self) || self.IsStun) return;
             Unit mouthItem = self.GetComponent<MouthItemUseComponent>()?.currentMouthItem;
-            if (mouthItem == null || !mouthItem.isActived || mouthItem.UnitSubType != EUnitSubType.Taser) return;
+            if (!StudentWeapons.IsLocalAk(mouthItem) || !mouthItem.isActived) return;
             TaserComponent taser = mouthItem.GetComponent<TaserComponent>();
             if (taser == null || TaserTryBuildShotMethod == null) return;
             if (!MonoSingletonT<SceneManager>.IsSingletonActive()) return;
@@ -832,7 +817,8 @@ namespace BioChem
                 Unit shooter = UnitManager.Instance.GetUnitByUID(sender);
                 Unit mouthItem = shooter != null && shooter.isActived && !shooter.IsDead && shooter.IsStudent
                     ? shooter.GetComponent<MouthItemUseComponent>()?.currentMouthItem : null;
-                if (mouthItem == null || !mouthItem.isActived || mouthItem.UnitSubType != EUnitSubType.Taser) return;
+                if (mouthItem == null || !mouthItem.isActived || !issuedTaser.TryGetValue(sender, out ulong itemUid)
+                    || mouthItem.UID != itemUid) return;
 
                 mgFireUntil[sender] = Time.unscaledTime + Config.fireInterval;
                 dartAmmo[sender] = GetDartAmmo(sender) - 1;
@@ -1276,7 +1262,7 @@ namespace BioChem
             if (RemainingStudents() > Config.hunterTriggerStudents) return;
             hunters.Add(uid);
             hp[uid] = Config.hunterHp;
-            RevokeTaser(uid); // 猎手固定用近战：变身即收走吹箭（嘴部清空）
+            StudentWeapons.RemovePlayer(uid);
             var message = new BioChemHunterMessage { Kind = BioChemHunterMessage.Transform, UnitUID = uid };
             Broadcast(message);
             ApplyHunterTransformLocal(message);
@@ -1301,7 +1287,7 @@ namespace BioChem
             HunterKnife.Ensure(unit); // 变身即发刀（各端本地建视觉；手骨未就绪时 Tick 自愈补建）
             if (message.UnitUID == UnitManager.Instance.localPlayerUID)
             {
-                localMgMode = false; // 猎手固定近战：本地连发模式清掉
+                StudentWeapons.RemovePlayer(message.UnitUID);
                 // 变身时若正按住使用物品，输入被吞后松开事件也收不到——主动停用防"物品自动续用"卡滞
                 unit.GetComponent<StudentItemUseComponent>()?.StopUseItem();
             }
@@ -1608,7 +1594,7 @@ namespace BioChem
             pillarBinds.Clear();
             pillarRetryAt.Clear();
             stunCooldownUntil.Clear();
-            foreach (ulong uid in new List<ulong>(issuedTaser.Keys)) RevokeTaser(uid);
+            StudentWeapons.ResetRound();
             downedUntil.Clear();
             serverSlowExpiries.Clear();
             selfSlowExpiries.Clear();
@@ -1618,7 +1604,6 @@ namespace BioChem
             Ak47Weapon.ResetForNewRound(); // AK 全收：世界枪/viewmodel/弹匣/换弹状态归零
             selfStamina = -1f;
             localStunReadyAt = 0f;
-            localMgMode = false;
             mgNextFireAt = 0f;
             mgFireUntil.Clear();
             lastSelfPosValid = false;
@@ -1654,7 +1639,7 @@ namespace BioChem
             stamina.Remove(playerUID);
             teacherEvolution.Remove(playerUID);
             stunCooldownUntil.Remove(playerUID);
-            RevokeTaser(playerUID);
+            StudentWeapons.RemovePlayer(playerUID);
             downedUntil.Remove(playerUID);
             serverSlowExpiries.Remove(playerUID);
             dartAmmo.Remove(playerUID);
@@ -1756,6 +1741,8 @@ namespace BioChem
             for (int i = 0; i < dto.stUids.Count && i < dto.stVals.Count; i++)
                 if (dto.stUids[i] != 0) stamina[(ulong)dto.stUids[i]] = dto.stVals[i];
             ulong selfUid = UnitManager.IsSingletonActive() ? UnitManager.Instance.localPlayerUID : 0;
+            if (selfUid != 0 && (!enabled || infected.Contains(selfUid) || hunters.Contains(selfUid)))
+                StudentWeapons.RemovePlayer(selfUid);
             int previousStage = GetEvolutionStage(selfUid);
             teacherEvolution.Clear();
             if (dto.evolutionUids != null && dto.evolutionStages != null)
@@ -1792,13 +1779,14 @@ namespace BioChem
             float dt = Time.unscaledDeltaTime;
             PruneSelfSlow();
             TickSelfStamina(dt);
-            TickMachineGun();
+            HandleKeys();
+            Ak47Weapon.Tick();
             HunterKnife.Tick(); // 挥刀驱动+自愈（无猎手时零开销早退）
             if (enabled)
             {
                 TickHunterMelee();
                 MiniTeacherCatch.TickSelfHeal(); // 感染名单里的抓取组件自愈（1s 节流）
-                Ak47Weapon.Tick();               // AK47 世界枪/ viewmodel/换弹驱动
+                TickMachineGun();
                 TickKilledTeachers();
                 if (NetRuntime.IsServer) TickHunterUnlockAnnounce();
             }
@@ -1813,7 +1801,6 @@ namespace BioChem
                     BroadcastState(); // 重连/中途加入靠全量重广播自愈
                 }
             }
-            HandleKeys();
         }
 
         // 变身解锁公告：剩余学生首次降到阈值时全端提示一次（服务端）
@@ -1895,26 +1882,16 @@ namespace BioChem
             if (!MonoSingletonT<InputManager>.IsSingletonActive() || !ReInput.isReady) return;
             Keyboard kb = ReInput.players.GetPlayer(0).controllers.Keyboard;
             if (kb == null) return;
-            // 掏吹箭不要求上课中（原生 Taser 无此限制），只要求输入未被冻结（面板打开时冻结 → 不响应）
-            if (kb.GetKeyDown(DartKey) && !InputOverFrozen() && UnitManager.IsSingletonActive())
-            {
-                Unit self = UnitManager.Instance.GetUnitByUID(UnitManager.Instance.localPlayerUID);
-                if (self != null && self.isActived && self.IsStudent && !infected.Contains(self.UID))
-                {
-                    // 有筒=收起；没筒=掏出连发筒（唯一吹箭模式，按住左键连发）
-                    var mouth = self.GetComponent<MouthItemUseComponent>();
-                    bool hasTaser = mouth?.currentMouthItem != null
-                        && mouth.currentMouthItem.UnitSubType == EUnitSubType.Taser;
-                    localMgMode = !hasTaser;
-                    if (localMgMode) mgNextFireAt = 0f; // 掏出后第一发立即可射
-                    SendToggleDart();
-                }
-            }
-            if (kb.GetKeyDown(StunKey) && !InputOverFrozen()) TryMiniStun();
-            // R 换弹：仅本地持 AK（嘴上挂着吹箭）时响应，TryReload 内部自行判装备状态
-            if (kb.GetKeyDown(KeyCode.R) && !InputOverFrozen()) Ak47Weapon.TryReload();
+            if (InputOverFrozen()) return;
+            // 课外仍可切换。射击沿用课堂进行中的门槛。
+            StudentWeaponSlot slot = StudentWeapons.ReadSlotKey(kb);
+            if (slot != StudentWeaponSlot.None && NetRuntime.IsConnected && UnitManager.IsSingletonActive()
+                && StudentWeapons.CanSelect(UnitManager.Instance.localPlayer))
+                SelectWeaponSlot(slot);
+            if (kb.GetKeyDown(StunKey)) TryMiniStun();
+            if (kb.GetKeyDown(KeyCode.R) && StudentWeapons.Selected == StudentWeaponSlot.Primary) Ak47Weapon.TryReload();
             // G 变身老师猎手：剩余学生 ≤ hunterTriggerStudents 时解锁（服务端会复验）
-            if (kb.GetKeyDown(HunterKey) && !InputOverFrozen() && CanTransformHunter()) SendTransformRequest();
+            if (kb.GetKeyDown(HunterKey) && CanTransformHunter()) SendTransformRequest();
         }
 
         internal static readonly KeyCode HunterKey = KeyCode.G;   // 学生变身为老师猎手
@@ -2002,19 +1979,34 @@ namespace BioChem
             MonoSingletonT<AudioManager>.Instance.PlayOneShot(sound, position);
         }
 
-        private static void SendToggleDart()
+        private static void SelectWeaponSlot(StudentWeaponSlot slot)
         {
-            var msg = new BioChemDartMessage { Kind = BioChemDartMessage.Toggle };
-            if (NetRuntime.IsServer) OnServerDart(null, msg);
-            else if (RoomManager.IsSingletonActive()) RoomManager.Instance.SendToServer(msg);
+            if (!RoomManager.IsSingletonActive()) return;
+            StudentWeapons.SelectLocal(slot);
+            var message = new BioChemWeaponSlotMessage { Slot = (byte)slot };
+            if (NetRuntime.IsServer) OnServerWeaponSlot(null, message);
+            else RoomManager.Instance.SendToServer(message);
         }
 
-        // 连发模式吞掉原生单击开火（否则一发就把嘴里的吹箭消耗掉）；瞄准（UseItem2）不受影响。
-        // 只拦本地玩家自己的筒——其他端玩家用原生单发不受影响
-        public static bool BeforeTaserHandleInput(TaserComponent __instance, eCmdType command, Unit ___user)
+        private static void OnServerWeaponSlot(NetworkConnectionToClient connection, BioChemWeaponSlotMessage message)
         {
-            if (command != eCmdType.UseItem || !localMgMode) return true;
-            return ___user == null || !___user.isLocalPlayer;
+            if (!enabled || !NetRuntime.IsServer || !UnitManager.IsSingletonActive() || !StudentWeapons.IsValid(message.Slot)) return;
+            ulong uid = ResolveSender(connection);
+            if (uid == 0) return;
+            Unit student = UnitManager.Instance.GetUnitByUID(uid);
+            if (!StudentWeapons.CanSelect(student)) return;
+
+            message.ItemUID = StudentWeapons.SelectOnServer(student, (StudentWeaponSlot)message.Slot);
+            if (connection == null || connection == NetworkServer.localConnection) StudentWeapons.ApplyIssuedItem(message);
+            else connection.Send(message);
+        }
+
+        // 已发放的 AK 用连发管线。切槽后等待同步回收期间，也拦住新发起的瞄准。
+        public static bool BeforeTaserHandleInput(TaserComponent __instance, eCmdType command, eClickType click, Unit ___user)
+        {
+            if (___user == null || !___user.isLocalPlayer || !StudentWeapons.IsLocalAk(__instance.owner)) return true;
+            if (command == eCmdType.UseItem) return false;
+            return command != eCmdType.UseItem2 || click == eClickType.Release || StudentWeapons.Selected == StudentWeaponSlot.Primary;
         }
 
         // F7 有 Rewired 与 IMGUI 两条通道，同一帧可能都触发，节流防双开关。
@@ -2057,6 +2049,7 @@ namespace BioChem
         {
             NetworkClient.RegisterHandler<BioChemStateMessage>(OnClientState, true);
             NetworkClient.RegisterHandler<BioChemDartMessage>(OnClientDart, true);
+            NetworkClient.RegisterHandler<BioChemWeaponSlotMessage>(StudentWeapons.ApplyIssuedItem, true);
             NetworkClient.RegisterHandler<BioChemStunMessage>(OnClientStun, true);
             NetworkClient.RegisterHandler<BioChemDownMessage>(OnClientDown, true);
             NetworkClient.RegisterHandler<BioChemHunterMessage>(OnClientHunter, true);
@@ -2066,17 +2059,20 @@ namespace BioChem
             {
                 enabled = false;
                 ClearRoundState();
+                StudentWeapons.ResetLocalItem();
             }
         }
 
         public static void RegisterServer()
         {
             NetworkServer.RegisterHandler<BioChemDartMessage>(OnServerDart, true);
+            NetworkServer.RegisterHandler<BioChemWeaponSlotMessage>(OnServerWeaponSlot, true);
             NetworkServer.RegisterHandler<BioChemStunMessage>(OnServerStun, true);
             NetworkServer.RegisterHandler<BioChemWriteMessage>(OnServerWrite, true);
             NetworkServer.RegisterHandler<BioChemHunterMessage>(OnServerHunter, true);
             // 新建房间：清掉上一局服务端瞬态（enabled 是房主设置，跨房保留）
             ClearRoundState();
+            StudentWeapons.ResetLocalItem();
         }
 
         private static void OnClientDart(BioChemDartMessage message)
