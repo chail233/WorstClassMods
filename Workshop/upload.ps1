@@ -54,6 +54,21 @@ robocopy $modSource $contentDir /MIR /NFL /NDL /NJH /NJS | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "robocopy 同步失败（退出码 $LASTEXITCODE）" }
 Write-Host "[状态] content 已同步：$modSource -> $contentDir"
 
+# 2.5 工坊剔除清单：Workshop\<Mod>\content-exclude.txt（每行一个相对 content 根的路径），
+#     用于剔除部署目录里存在、但工坊发布不需要的文件（如开发文档、源格式副本）。
+$excludeList = Join-Path $modRoot 'content-exclude.txt'
+if (Test-Path $excludeList) {
+    Get-Content $excludeList -Encoding UTF8 | ForEach-Object {
+        $rel = $_.Trim()
+        if ($rel -eq '' -or $rel.StartsWith('#')) { return }
+        $target = Join-Path $contentDir $rel
+        if (Test-Path $target) {
+            Remove-Item -Recurse -Force $target
+            Write-Host "[状态] 已按剔除清单移除：$rel"
+        }
+    }
+}
+
 # 3. item.vdf：不存在则按 mod.json 生成骨架（已有则只更新动态字段，title/description 以 vdf 为准）
 $vdfPath = Join-Path $modRoot 'item.vdf'
 if (-not (Test-Path $vdfPath)) {

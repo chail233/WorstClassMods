@@ -1,0 +1,6 @@
+# 工坊 content 剔除清单：部署目录里有、但运行时不需要的文件（相对 content 根）
+# .png 是转换器源图集副本（运行时只读 .raw）；CREDITS.txt 是开发文档
+Assets/ak47.png
+Assets/kukri.png
+Assets/pistol.png
+Assets/CREDITS.txt
