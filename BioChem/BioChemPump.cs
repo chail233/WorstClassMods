@@ -94,13 +94,64 @@ namespace BioChem
 
         internal static void WriteWeaponSlot(NetworkWriter writer, BioChemWeaponSlotMessage message)
         {
+            writer.WriteULong(message.UserUID);
             writer.WriteByte(message.Slot);
             writer.WriteULong(message.ItemUID);
         }
 
         internal static BioChemWeaponSlotMessage ReadWeaponSlot(NetworkReader reader)
         {
-            return new BioChemWeaponSlotMessage { Slot = reader.ReadByte(), ItemUID = reader.ReadULong() };
+            return new BioChemWeaponSlotMessage { UserUID = reader.ReadULong(), Slot = reader.ReadByte(), ItemUID = reader.ReadULong() };
+        }
+
+        internal static void WriteMelee(NetworkWriter writer, BioChemMeleeMessage message)
+        {
+            writer.WriteByte(message.Kind);
+            writer.WriteBool(message.Heavy);
+            writer.WriteULong(message.UnitUID);
+            writer.WriteInt(message.Hp);
+            writer.WriteVector3(message.Origin);
+            writer.WriteVector3(message.Direction);
+            writer.WriteULong(message.AttackerUID);
+        }
+
+        internal static BioChemMeleeMessage ReadMelee(NetworkReader reader)
+        {
+            return new BioChemMeleeMessage
+            {
+                Kind = reader.ReadByte(),
+                Heavy = reader.ReadBool(),
+                UnitUID = reader.ReadULong(),
+                Hp = reader.ReadInt(),
+                Origin = reader.ReadVector3(),
+                Direction = reader.ReadVector3(),
+                AttackerUID = reader.ReadULong()
+            };
+        }
+
+        internal static void WriteGrenade(NetworkWriter writer, BioChemGrenadeMessage message)
+        {
+            writer.WriteByte(message.Kind);
+            writer.WriteULong(message.UserUID);
+            writer.WriteUInt(message.Seq);
+            writer.WriteInt(message.Count);
+            writer.WriteVector3(message.Origin);
+            writer.WriteVector3(message.Velocity);
+            writer.WriteVector3(message.Position);
+        }
+
+        internal static BioChemGrenadeMessage ReadGrenade(NetworkReader reader)
+        {
+            return new BioChemGrenadeMessage
+            {
+                Kind = reader.ReadByte(),
+                UserUID = reader.ReadULong(),
+                Seq = reader.ReadUInt(),
+                Count = reader.ReadInt(),
+                Origin = reader.ReadVector3(),
+                Velocity = reader.ReadVector3(),
+                Position = reader.ReadVector3()
+            };
         }
 
         internal static void WriteStun(NetworkWriter writer, BioChemStunMessage message)

@@ -34,8 +34,9 @@ namespace BioChem
         private static TeacherSwordShakeSettings shakeSettings;  // 优先抄老师剑 hitShake 曲线，懒解析一次
         private static GUIStyle numberStyle;                     // IMGUI 样式（OnGUI 内懒建）
 
-        /// <summary>预测命中一条（攻击者本机）：target=被击者，killed=按当前 HP 预测致死</summary>
-        internal static void OnPredictedHit(Unit target, bool killed)
+        /// <summary>预测命中一条（攻击者本机）：target=被击者，killed=按当前 HP 预测致死/击倒；
+        /// damage=本次伤害（-1 用 hunterDamage），killText=致死文案（军刀击倒传"击倒!"）</summary>
+        internal static void OnPredictedHit(Unit target, bool killed, int damage = -1, string killText = "击杀!")
         {
             float now = Time.unscaledTime;
             if (killed) killMarkerUntil = now + KillMarkerTime;
@@ -43,7 +44,7 @@ namespace BioChem
             numbers.Add(new FloatNumber
             {
                 worldPos = target.Position + Vector3.up * 1.5f,
-                text = killed ? "击杀!" : "-" + ModEntry.Config.hunterDamage,
+                text = killed ? killText : "-" + (damage >= 0 ? damage : ModEntry.Config.hunterDamage),
                 color = killed ? new Color(1f, 0.25f, 0.2f) : new Color(1f, 0.9f, 0.55f),
                 fontSize = killed ? 30 : 22,
                 spawnAt = now,
@@ -52,8 +53,9 @@ namespace BioChem
             PlayShake(killed ? KillShakeScale : 1f);
         }
 
-        // 复用老师剑命中震屏（与老师挥剑命中同一手感来源；曲线上优先抄场上老师模型的 hitShake 设置）
-        private static void PlayShake(float amplitudeScale)
+        // 复用老师剑命中震屏（与老师挥剑命中同一手感来源；曲线上优先抄场上老师模型的 hitShake 设置）。
+        // 手雷爆炸近距离震屏也走这里（BioGrenade.PlayExplosion）
+        internal static void PlayShake(float amplitudeScale)
         {
             if (!MonoSingletonT<SceneManager>.IsSingletonActive()) return;
             Camera camera = MonoSingletonT<SceneManager>.Instance.MainCamera;

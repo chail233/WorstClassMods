@@ -22,3 +22,6 @@ Workshop/.content/
 
 # 本地临时工具（UnityPy 等资产解析用）
 .tools/
+
+# 转换器/排查临时输出
+Tools/out/

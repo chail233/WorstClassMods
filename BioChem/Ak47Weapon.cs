@@ -26,8 +26,8 @@ namespace BioChem
         private const float RecoilPosKick = 0.05f;   // viewmodel 后坐（沿 -Z 位移冲量）
         private const float RecoilRotKick = 7f;      // 后坐上抬角度
         private const float ModelLength = 0.9f;      // 模型归一化长度（米）
-        // 打包 OBJ 的枪口圆环中心，模型沿 -Z 朝前。
-        private static readonly Vector3 ObjMuzzle = new Vector3(0f, 0.010f, -0.630511f);
+        // 打包 OBJ（CS1.6 模型）文件坐标里的枪口环中心：枪口沿 -Z，LoadObj 按 180° yaw 转到 +Z
+        private static readonly Vector3 ObjMuzzle = new Vector3(-0.069f, 2.473f, -18.290f);
         // viewmodel 在相机空间的位姿（参考老师剑 idleCameraOffset (0.35, -0.38, 0.7)）
         private static readonly Vector3 ViewLocalPos = new Vector3(0.30f, -0.26f, 0.55f);
         private static readonly Vector3 ViewLocalEuler = new Vector3(3f, 4f, 0f);
@@ -144,7 +144,7 @@ namespace BioChem
             foreach (var col in go.GetComponentsInChildren<Collider>(true)) Object.Destroy(col);
             go.transform.GetChild(0).localScale = new Vector3(0.03f, 0.03f, 0.7f); // 细长曳光
             var renderer = go.GetComponentInChildren<MeshRenderer>();
-            renderer.sharedMaterial = Tint(new Color(1f, 0.8f, 0.35f), 0f); // 亮黄曳光
+            renderer.sharedMaterial = WeaponModels.Tint(new Color(1f, 0.8f, 0.35f), 0f); // 亮黄曳光
             // 保持激活（Instantiate inactive prefab 会得到隐形实例），停放到地图下方防穿帮
             go.transform.position = new Vector3(0f, -500f, 0f);
             Object.DontDestroyOnLoad(go);
@@ -260,7 +260,7 @@ namespace BioChem
             return mouthItem != null && mouthItem.isActived && mouthItem.UnitSubType == EUnitSubType.Taser;
         }
 
-        // ===== 世界枪（所有持 Taser 玩家的手部模型，含自己——自己的走 PlayerSelf 层被本机相机剔除） =====
+        // ===== 世界枪（当前槽位是主武器 AK47 的玩家的手部模型，含自己——自己的走 PlayerSelf 层被本机相机剔除） =====
 
         private static void ScanWorldGuns()
         {
@@ -268,7 +268,11 @@ namespace BioChem
             foreach (Unit unit in UnitManager.Instance.playerList)
             {
                 if (unit == null || !unit.isActived) continue;
-                bool hasTaser = unit.isLocalPlayer ? equipped : MouthHasTaser(unit);
+                // 远端玩家：嘴上有吹箭承载物且当前槽位不是副武器（手枪由 PistolWeapon 画）才显示 AK；
+                // 自己看 equipped（Selected==Primary 且已同步挂载）
+                bool hasTaser = unit.isLocalPlayer
+                    ? equipped
+                    : MouthHasTaser(unit) && StudentWeapons.RemoteSlotOf(unit.UID) != StudentWeaponSlot.Secondary;
                 if (hasTaser)
                 {
                     EnsureWorldGun(unit);
@@ -311,7 +315,7 @@ namespace BioChem
             }
             gun.gameObject.SetActive(true);
             int layer = LayerMask.NameToLayer(unit.isLocalPlayer ? "PlayerSelf" : "Player");
-            if (layer >= 0) SetLayerRecursive(gun.gameObject, layer);
+            if (layer >= 0) WeaponModels.SetLayerRecursive(gun.gameObject, layer);
             worldGuns[unit.UID] = new Rig { gun = gun, restRot = gun.localRotation };
         }
 
@@ -398,7 +402,7 @@ namespace BioChem
             }
             else
             {
-                mr.sharedMaterial = Tint(new Color(1f, 0.75f, 0.3f), 0f);
+                mr.sharedMaterial = WeaponModels.Tint(new Color(1f, 0.75f, 0.3f), 0f);
             }
             flash.transform.localRotation = Quaternion.Euler(0f, 180f, 0f); // Quad 单面，翻向相机
             flash.SetActive(false);
@@ -430,7 +434,10 @@ namespace BioChem
             try
             {
                 string objPath = string.IsNullOrEmpty(modDir) ? null : Path.Combine(modDir, "Assets", "ak47.obj");
-                templateGun = objPath != null && File.Exists(objPath) ? LoadObjTemplate(objPath) : null;
+                templateGun = objPath != null && File.Exists(objPath)
+                    ? WeaponModels.LoadObj(objPath, "Ak47Model", new Color(0.18f, 0.17f, 0.16f), 0.45f, ModelLength, 180f, ObjMuzzle, out _,
+                        textureFile: string.IsNullOrEmpty(modDir) ? null : Path.Combine(modDir, "Assets", "ak47.png"))
+                    : null;
                 if (templateGun != null)
                     ModEntry.Log?.Invoke("[状态] AK47 模型已加载（OBJ）");
             }
@@ -443,103 +450,6 @@ namespace BioChem
             templateGun.gameObject.SetActive(false);
             Object.DontDestroyOnLoad(templateGun);
             return templateGun != null;
-        }
-
-        // 运行时 OBJ 解析：v/vt/vn/f（多边形 fan 三角化、负索引支持），忽略材质/分组；
-        // 加载后归一化：枪口旋到 +Z、总长缩到 ModelLength、包围盒中心移到原点。
-        private static Transform LoadObjTemplate(string path)
-        {
-            var positions = new List<Vector3>();
-            var uvs = new List<Vector2>();
-            var normals = new List<Vector3>();
-            var outVerts = new List<Vector3>();
-            var outUvs = new List<Vector2>();
-            var outNormals = new List<Vector3>();
-            var triangles = new List<int>();
-            bool hasUv = false, hasNormal = false;
-
-            foreach (string raw in File.ReadAllLines(path))
-            {
-                string line = raw.Trim();
-                if (line.Length == 0 || line.StartsWith("#")) continue;
-                // RemoveEmptyEntries：双空格/尾空格会产生空 token（解析成零顶点角=退化三角形）
-                string[] parts = line.Split(new[] { ' ' }, System.StringSplitOptions.RemoveEmptyEntries);
-                if (parts[0] == "v" && parts.Length >= 4)
-                {
-                    positions.Add(new Vector3(Parse(parts[1]), Parse(parts[2]), Parse(parts[3])));
-                }
-                else if (parts[0] == "vt" && parts.Length >= 3)
-                {
-                    uvs.Add(new Vector2(Parse(parts[1]), Parse(parts[2])));
-                }
-                else if (parts[0] == "vn" && parts.Length >= 4)
-                {
-                    normals.Add(new Vector3(Parse(parts[1]), Parse(parts[2]), Parse(parts[3])));
-                }
-                else if (parts[0] == "f" && parts.Length >= 4)
-                {
-                    var corners = new List<int[]>(); // 每角 [v, vt, vn]，0 = 无
-                    foreach (string token in parts)
-                    {
-                        if (token == "f") continue;
-                        string[] idx = token.Split('/');
-                        int v = Idx(idx[0], positions.Count);
-                        int vt = idx.Length > 1 && idx[1].Length > 0 ? Idx(idx[1], uvs.Count) : 0;
-                        int vn = idx.Length > 2 && idx[2].Length > 0 ? Idx(idx[2], normals.Count) : 0;
-                        corners.Add(new[] { v, vt, vn });
-                    }
-                    // fan 三角化：每个角生成独立顶点（保留逐角 uv/normal，不做共享索引）
-                    int baseIndex = outVerts.Count;
-                    foreach (var c in corners)
-                    {
-                        outVerts.Add(c[0] > 0 ? positions[c[0] - 1] : Vector3.zero);
-                        hasUv |= c[1] > 0;
-                        outUvs.Add(c[1] > 0 ? uvs[c[1] - 1] : Vector2.zero);
-                        hasNormal |= c[2] > 0;
-                        outNormals.Add(c[2] > 0 ? normals[c[2] - 1] : Vector3.up);
-                    }
-                    for (int i = 1; i < corners.Count - 1; i++)
-                    {
-                        triangles.Add(baseIndex);
-                        triangles.Add(baseIndex + i);
-                        triangles.Add(baseIndex + i + 1);
-                    }
-                }
-            }
-            if (positions.Count == 0 || triangles.Count == 0) return null;
-
-            var mesh = new Mesh { vertices = outVerts.ToArray(), triangles = triangles.ToArray(), normals = outNormals.ToArray(), uv = outUvs.ToArray() };
-            if (!hasNormal) mesh.RecalculateNormals();
-            if (!hasUv) mesh.uv = new Vector2[mesh.vertexCount];
-            mesh.RecalculateBounds();
-            Vector3 muzzlePosition = NormalizeMesh(mesh);
-
-            var root = new GameObject("Ak47Model");
-            var child = new GameObject("mesh");
-            child.transform.SetParent(root.transform, false);
-            child.AddComponent<MeshFilter>().sharedMesh = mesh;
-            child.AddComponent<MeshRenderer>().sharedMaterial = Tint(new Color(0.18f, 0.17f, 0.16f), 0.45f); // 枪灰金属
-            var muzzle = new GameObject("muzzle");
-            muzzle.transform.SetParent(root.transform, false);
-            muzzle.transform.localPosition = muzzlePosition;
-            return root.transform;
-        }
-
-        private static Vector3 NormalizeMesh(Mesh mesh)
-        {
-            var verts = mesh.vertices;
-            var normals = mesh.normals;
-            var bounds = mesh.bounds;
-            Quaternion modelRotation = Quaternion.Euler(0f, 180f, 0f);
-            float scale = ModelLength / Mathf.Max(0.01f, bounds.size.z);
-            for (int i = 0; i < verts.Length; i++)
-                verts[i] = modelRotation * ((verts[i] - bounds.center) * scale);
-            for (int i = 0; i < normals.Length; i++)
-                normals[i] = modelRotation * normals[i];
-            mesh.vertices = verts;
-            mesh.normals = normals;
-            mesh.RecalculateBounds();
-            return modelRotation * ((ObjMuzzle - bounds.center) * scale);
         }
 
         // 程序化兜底 AK：机匣/枪管/导气管/准星/木护木/斜弹匣/握把/枪托，枪口 +Z 前方
@@ -555,7 +465,7 @@ namespace BioChem
                 go.transform.localPosition = pos;
                 go.transform.localRotation = Quaternion.Euler(euler ?? Vector3.zero);
                 go.transform.localScale = size;
-                go.GetComponent<MeshRenderer>().sharedMaterial = Tint(color, smoothness);
+                go.GetComponent<MeshRenderer>().sharedMaterial = WeaponModels.Tint(color, smoothness);
                 return go.transform;
             }
             Color gunmetal = new Color(0.16f, 0.16f, 0.17f);
@@ -619,40 +529,6 @@ namespace BioChem
                 return path;
             }
             catch { return null; }
-        }
-
-        // ===== 小工具 =====
-
-        private static float Parse(string s)
-        {
-            float v;
-            float.TryParse(s, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out v);
-            return v;
-        }
-
-        private static int Idx(string s, int count) // OBJ 索引 1 基 + 负数（相对当前）
-        {
-            if (!int.TryParse(s, out int v)) return 0;
-            return v > 0 ? (v <= count ? v : 0) : (count + v + 1 > 0 ? count + v + 1 : 0);
-        }
-
-        private static Material Tint(Color color, float smoothness)
-        {
-            Shader shader = Shader.Find("Universal Render Pipeline/Lit");
-            if (shader == null) shader = Shader.Find("Standard");
-            if (shader == null) return null;
-            var material = new Material(shader);
-            if (material.HasProperty("_BaseColor")) material.SetColor("_BaseColor", color);
-            else if (material.HasProperty("_Color")) material.SetColor("_Color", color);
-            if (material.HasProperty("_Smoothness")) material.SetFloat("_Smoothness", smoothness);
-            return material;
-        }
-
-        private static void SetLayerRecursive(GameObject go, int layer)
-        {
-            go.layer = layer;
-            foreach (Transform child in go.transform)
-                SetLayerRecursive(child.gameObject, layer);
         }
     }
 }

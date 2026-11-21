@@ -8,16 +8,14 @@ namespace BioChem
 {
     // 管理面板：UGUI 复用游戏设置窗口（UISettingView）的素材——背景框 / 按钮图 / 字体，
     // 关闭过的窗口实例留在窗口池里（SetActive(false) + 回池），运行时随时可从中抽取引用。
-    // 双页签：数值设置（房主可调，随状态快照同步全员）+ 玩法规则（按当前数值动态生成）
+    // 单页布局：状态 + 模式开关 + 数值步进器网格（玩法规则长文案已删——超出屏幕）
     internal static class BioChemPanel
     {
         private static GameObject canvasGo;
         private static Text statusText;
-        private static Text rulesText;
         private static Button hostToggle;
         private static Text hostToggleLabel;
         private static GameObject settingsPage;
-        private static GameObject rulesPage;
         private static bool uiRuleActive;
 
         private static Sprite bgSprite;
@@ -232,8 +230,8 @@ namespace BioChem
             }
 
             float innerW = Mathf.Abs(win.rect.width) - 96f;
-            float bodyTopY = -210f;
-            float bodyH = Mathf.Max(240f, winH - 210f - 62f);
+            float bodyTopY = -160f; // 玩法规则页签已删：状态行 + 开关下面就是步进器网格
+            float bodyH = Mathf.Max(240f, winH - 160f - 62f);
 
             statusText = NewText(win, "状态", "", baseFontSize, TextAnchor.UpperLeft, bodyInk);
             Place(statusText.rectTransform, new Vector2(0.5f, 1f), new Vector2(0f, 1f), new Vector2(innerW, 56f), new Vector2(-innerW / 2f, -64f));
@@ -245,29 +243,12 @@ namespace BioChem
             Place(hostToggle.GetComponent<RectTransform>(), new Vector2(0.5f, 1f), new Vector2(0.5f, 0.5f), new Vector2(400f, 44f), new Vector2(0f, -124f));
             hostToggleLabel = hostToggle.GetComponentInChildren<Text>();
 
-            // 页签：数值设置 / 玩法规则
-            float pageW = Mathf.Min(200f, innerW / 2f - 8f);
-            Button pageBtn1 = NewButton(win, "页签_数值", "数值设置", new Color(0.2f, 0.38f, 0.62f, 1f), new Vector2(pageW, 34f), () => ShowPage(true));
-            Place(pageBtn1.GetComponent<RectTransform>(), new Vector2(0.5f, 1f), new Vector2(0.5f, 0.5f), new Vector2(pageW, 34f), new Vector2(-pageW / 2f - 6f, -172f));
-            Button pageBtn2 = NewButton(win, "页签_规则", "玩法规则", new Color(0.2f, 0.38f, 0.62f, 1f), new Vector2(pageW, 34f), () => ShowPage(false));
-            Place(pageBtn2.GetComponent<RectTransform>(), new Vector2(0.5f, 1f), new Vector2(0.5f, 0.5f), new Vector2(pageW, 34f), new Vector2(pageW / 2f + 6f, -172f));
-
-            // 数值页：两列步进器网格
+            // 步进器网格：单页铺满（玩法规则长文案已删，避免超出屏幕）
             var settingsGo = new GameObject("数值页", typeof(RectTransform));
             settingsGo.transform.SetParent(win, false);
             Place(settingsGo.GetComponent<RectTransform>(), new Vector2(0.5f, 1f), new Vector2(0.5f, 1f), new Vector2(innerW, bodyH), new Vector2(0f, bodyTopY));
             BuildGrid(settingsGo.transform, innerW, bodyH);
             settingsPage = settingsGo;
-
-            // 规则页：文案每次 Refresh 按当前数值重建
-            var rulesGo = new GameObject("规则页", typeof(RectTransform));
-            rulesGo.transform.SetParent(win, false);
-            Place(rulesGo.GetComponent<RectTransform>(), new Vector2(0.5f, 1f), new Vector2(0.5f, 1f), new Vector2(innerW, bodyH), new Vector2(0f, bodyTopY));
-            rulesText = NewText(rulesGo.transform, "规则", "", baseFontSize - 2, TextAnchor.UpperLeft, bodyInk);
-            Place(rulesText.rectTransform, new Vector2(0f, 1f), new Vector2(0f, 1f), new Vector2(innerW, bodyH), Vector2.zero);
-            rulesText.verticalOverflow = VerticalWrapMode.Overflow;
-            rulesPage = rulesGo;
-            ShowPage(true);
 
             Image closeImg = NewImage(win, "关闭", btnSprite, new Color(0.5f, 0.25f, 0.25f, 1f));
             Place(closeImg.rectTransform, new Vector2(0.5f, 0f), new Vector2(1f, 0f), new Vector2(150f, 52f), new Vector2(-24f, 18f));
@@ -275,12 +256,6 @@ namespace BioChem
             Text closeLabel = NewText(closeImg.transform, "文字", "关闭", baseFontSize, TextAnchor.MiddleCenter, bodyInk);
             Stretch(closeLabel.rectTransform);
             closeBtn.onClick.AddListener(Close);
-        }
-
-        private static void ShowPage(bool settings)
-        {
-            if (settingsPage != null) settingsPage.SetActive(settings);
-            if (rulesPage != null) rulesPage.SetActive(!settings);
         }
 
         // ===== 数值步进器 =====
@@ -348,14 +323,46 @@ namespace BioChem
                 Get=()=>ModEntry.Config.hunterDamage, Set=v=>ModEntry.Config.hunterDamage=Mathf.RoundToInt(v) },
             new NumField { Label="猎手攻速(秒)", Step=0.1f, Min=0.1f, Max=10f,
                 Get=()=>ModEntry.Config.hunterAttackInterval, Set=v=>ModEntry.Config.hunterAttackInterval=v },
+            new NumField { Label="手枪伤害", Step=1, Min=1, Max=99, Int=true,
+                Get=()=>ModEntry.Config.pistolDamage, Set=v=>ModEntry.Config.pistolDamage=Mathf.RoundToInt(v) },
+            new NumField { Label="手枪弹匣", Step=1, Min=1, Max=60, Int=true,
+                Get=()=>ModEntry.Config.pistolMagSize, Set=v=>ModEntry.Config.pistolMagSize=Mathf.RoundToInt(v) },
+            new NumField { Label="手枪备弹上限", Step=5, Min=1, Max=999, Int=true,
+                Get=()=>ModEntry.Config.pistolMaxAmmo, Set=v=>ModEntry.Config.pistolMaxAmmo=Mathf.RoundToInt(v) },
+            new NumField { Label="食物补手枪弹", Step=5, Min=0, Max=999, Int=true,
+                Get=()=>ModEntry.Config.pistolAmmoPerFood, Set=v=>ModEntry.Config.pistolAmmoPerFood=Mathf.RoundToInt(v) },
+            new NumField { Label="手枪射速(秒)", Step=0.1f, Min=0.1f, Max=10f,
+                Get=()=>ModEntry.Config.pistolFireInterval, Set=v=>ModEntry.Config.pistolFireInterval=v },
+            new NumField { Label="军刀轻击伤害", Step=1, Min=1, Max=99, Int=true,
+                Get=()=>ModEntry.Config.kukriLightDamage, Set=v=>ModEntry.Config.kukriLightDamage=Mathf.RoundToInt(v) },
+            new NumField { Label="军刀重击伤害", Step=1, Min=1, Max=99, Int=true,
+                Get=()=>ModEntry.Config.kukriHeavyDamage, Set=v=>ModEntry.Config.kukriHeavyDamage=Mathf.RoundToInt(v) },
+            new NumField { Label="轻击间隔(秒)", Step=0.1f, Min=0.15f, Max=10f,
+                Get=()=>ModEntry.Config.kukriLightInterval, Set=v=>ModEntry.Config.kukriLightInterval=v },
+            new NumField { Label="重击冷却(秒)", Step=0.1f, Min=0.2f, Max=10f,
+                Get=()=>ModEntry.Config.kukriHeavyCooldown, Set=v=>ModEntry.Config.kukriHeavyCooldown=v },
+            new NumField { Label="轻击距离", Step=0.5f, Min=0.5f, Max=10f,
+                Get=()=>ModEntry.Config.kukriLightRange, Set=v=>ModEntry.Config.kukriLightRange=v },
+            new NumField { Label="重击距离", Step=0.5f, Min=0.5f, Max=10f,
+                Get=()=>ModEntry.Config.kukriHeavyRange, Set=v=>ModEntry.Config.kukriHeavyRange=v },
+            new NumField { Label="手雷伤害", Step=5, Min=1, Max=999, Int=true,
+                Get=()=>ModEntry.Config.grenadeDamage, Set=v=>ModEntry.Config.grenadeDamage=Mathf.RoundToInt(v) },
+            new NumField { Label="手雷半径", Step=0.5f, Min=1f, Max=20f,
+                Get=()=>ModEntry.Config.grenadeRadius, Set=v=>ModEntry.Config.grenadeRadius=v },
+            new NumField { Label="手雷引信(秒)", Step=0.5f, Min=1f, Max=10f,
+                Get=()=>ModEntry.Config.grenadeFuseSeconds, Set=v=>ModEntry.Config.grenadeFuseSeconds=v },
         };
 
         private static float BuildGrid(Transform parent, float innerW, float bodyH)
         {
-            float cellW = (innerW - 12f) / 2f;
-            int rows = (NumFields.Length + 1) / 2;
-            float rowH = Mathf.Clamp(bodyH / rows, 24f, 40f);
-            int labelSize = Mathf.Max(15, baseFontSize - 5);
+            // 超过 30 项自动切三列，防两列布局把面板撑出屏（行高同步压扁）
+            int columns = NumFields.Length > 30 ? 3 : 2;
+            int rows = (NumFields.Length + columns - 1) / columns;
+            float cellW = (innerW - 12f * (columns - 1)) / columns;
+            float rowH = Mathf.Clamp(bodyH / rows, 20f, 40f);
+            // 字号必须跟着行高缩：39 项把行高压到 20 多像素，还按 baseFontSize-5 取字号会被整行截没
+            int labelSize = Mathf.Clamp(Mathf.FloorToInt(rowH * 0.6f), 13, baseFontSize - 5);
+            int btnFontSize = Mathf.Clamp(labelSize + 2, 13, Mathf.FloorToInt(rowH - 9f));
             for (int i = 0; i < NumFields.Length; i++)
             {
                 NumField f = NumFields[i];
@@ -367,20 +374,20 @@ namespace BioChem
                 Place(cell.GetComponent<RectTransform>(), new Vector2(0.5f, 1f), new Vector2(0f, 1f), new Vector2(cellW, rowH - 6f), new Vector2(x, y));
 
                 Text label = NewText(cell.transform, "标签", f.Label, labelSize, TextAnchor.MiddleLeft, bodyInk);
-                Place(label.rectTransform, new Vector2(0f, 1f), new Vector2(0f, 1f), new Vector2(Mathf.Max(60f, cellW - 116f), rowH - 6f), Vector2.zero);
+                Place(label.rectTransform, new Vector2(0f, 1f), new Vector2(0f, 1f), new Vector2(Mathf.Max(60f, cellW - 96f), rowH - 6f), Vector2.zero);
 
-                // 右侧一组：− [数值] +（留 4px 间隔，避免数值被加号压住）
-                f.MinusBtn = NewButton(cell.transform, "减", "−", new Color(0.45f, 0.3f, 0.2f, 1f), new Vector2(24f, rowH - 8f),
-                    () => Adjust(f, -f.Step));
-                Place(f.MinusBtn.GetComponent<RectTransform>(), new Vector2(0f, 1f), new Vector2(0f, 1f), new Vector2(24f, rowH - 8f), new Vector2(cellW - 108f, 0f));
+                // 右侧一组：− [数值] +（共占 96px，给六字标签留够宽度）
+                f.MinusBtn = NewButton(cell.transform, "减", "−", new Color(0.45f, 0.3f, 0.2f, 1f), new Vector2(22f, rowH - 8f),
+                    () => Adjust(f, -f.Step), btnFontSize);
+                Place(f.MinusBtn.GetComponent<RectTransform>(), new Vector2(0f, 1f), new Vector2(0f, 1f), new Vector2(22f, rowH - 8f), new Vector2(cellW - 96f, 0f));
 
                 f.ValueText = NewText(cell.transform, "值", "", labelSize, TextAnchor.MiddleCenter,
                     lightBg ? new Color(0.55f, 0.36f, 0.05f, 1f) : new Color(1f, 0.92f, 0.6f, 1f));
-                Place(f.ValueText.rectTransform, new Vector2(0f, 1f), new Vector2(0f, 1f), new Vector2(48f, rowH - 6f), new Vector2(cellW - 80f, 0f));
+                Place(f.ValueText.rectTransform, new Vector2(0f, 1f), new Vector2(0f, 1f), new Vector2(44f, rowH - 6f), new Vector2(cellW - 70f, 0f));
 
-                f.PlusBtn = NewButton(cell.transform, "加", "+", new Color(0.25f, 0.42f, 0.28f, 1f), new Vector2(24f, rowH - 8f),
-                    () => Adjust(f, f.Step));
-                Place(f.PlusBtn.GetComponent<RectTransform>(), new Vector2(0f, 1f), new Vector2(0f, 1f), new Vector2(24f, rowH - 8f), new Vector2(cellW - 28f, 0f));
+                f.PlusBtn = NewButton(cell.transform, "加", "+", new Color(0.25f, 0.42f, 0.28f, 1f), new Vector2(22f, rowH - 8f),
+                    () => Adjust(f, f.Step), btnFontSize);
+                Place(f.PlusBtn.GetComponent<RectTransform>(), new Vector2(0f, 1f), new Vector2(0f, 1f), new Vector2(22f, rowH - 8f), new Vector2(cellW - 26f, 0f));
             }
             return rows * rowH;
         }
@@ -393,34 +400,6 @@ namespace BioChem
             f.Set(Mathf.Clamp(v, f.Min, f.Max));
             BioChemConfig.Instance.Clamp(); // 全量边界兜底
             ModEntry.OnConfigEdited();
-        }
-
-        private static string BuildRulesText()
-        {
-            var c = ModEntry.Config;
-            // 吹箭伤害句：按感染加伤开关动态生成（关=固定伤害；开=伤害随小老师人数递增，带当前实时值）
-            float bonus = ModEntry.DartDamageBonus();
-            string dartDamageText = c.dartDamageBonusPerInfected > 0f
-                ? "命中伤害 " + ModEntry.EffectiveDartDamage() + "（基础 " + c.dartDamage + "，每有小老师 +"
-                    + (c.dartDamageBonusPerInfected * 100f).ToString("0") + "% 系数、上限 +" + (ModEntry.DartDamageBonusCap * 100f).ToString("0")
-                    + "%，当前已感染 " + ModEntry.infected.Count + " 人 → 加成 +" + (bonus * 100f).ToString("0") + "%）"
-                : "命中 -" + c.dartDamage + " HP";
-            return "规则：\n" +
-                (c.initialInfectedStudents > 0
-                    ? "· 上课时随机感染最多 " + c.initialInfectedStudents + " 名真人学生，至少留一名未感染学生\n"
-                    : "· 开局感染已关闭\n") +
-                "· 老师把真人学生挂上罚站柱超过 " + c.pillarInfectSeconds.ToString("0") + " 秒，自动释放并感染为小老师\n" +
-                "· 小老师：学生功能禁用（看不到其他玩家 ID）、捣蛋不计分；HP " + c.miniMaxHp + "，写板书长按读条缓慢回体力，走路每秒耗 " + c.staminaDrainPerSecond.ToString("0.#") + " 体力\n" +
-                "· 小老师按 F 击晕身边学生 " + c.miniStunSeconds.ToString("0.#") + " 秒：耗体力 " + c.staminaCostPerStun.ToString("0.#") + "、冷却 " + c.miniStunCooldownSeconds.ToString("0.#") + " 秒、距离 " + c.miniStunRange.ToString("0.#") + " 米，体力不足无法击晕\n" +
-                "· 大老师 HP " + c.teacherMaxHp + "，写板书回复 " + c.teacherHpPerWrite + " HP；HP 归零晕倒 " + c.downSeconds.ToString("0") + " 秒后从办公室复活并刷新状态\n" +
-                "· 老师挂起真人学生升一阶，每局最多 " + ModEntry.MaxEvolutionStage + " 阶。每阶增加基础生命上限的 " + ModEntry.EvolutionHpPercentPerStage + "%（向上取整），回满生命和体力，清除吹箭减速。复活保留阶段\n" +
-                "· 学生按 1/2/3/4 切换主武器、副武器、近战和投掷物。主武器是 AK47，其余栏位暂空，切到空栏会收枪\n" +
-                "· AK47 右键瞄准，按住左键每 " + c.fireInterval.ToString("0.#") + " 秒射击一次，R 换弹。" + dartDamageText + "；每层减速 " + (c.dartSlowPerStack * 100f).ToString("0") + "%（持续 " + c.dartSlowSeconds.ToString("0.#") + " 秒，最多 " + c.dartSlowMaxStacks + " 层）；无眩晕，打中学生无效\n" +
-                "· 吹箭备弹 " + c.dartMaxAmmo + " 发（新一局自动回满），耗尽后无法射击" + (c.dartAmmoPerFood > 0 ? "；吃完一份食物补 " + c.dartAmmoPerFood + " 发（火锅食材也计入）" : "") + "\n" +
-                "· 生化胜负：捣蛋值整体不生效（捣蛋进度、学生捣蛋胜利、机制奖励全部冻结）；倒计时结束=幸存学生获胜，老师队伍在倒计时内抓完全部学生则老师获胜\n" +
-                "· 老师猎手：剩余学生 ≤ " + c.hunterTriggerStudents + " 人时学生按 G 变身（变大+特效，HP " + c.hunterHp + "）；近战左键挥击伤害 " + c.hunterDamage + "（间隔 " + c.hunterAttackInterval.ToString("0.#") + "s、范围 2.2m）；被老师剑击/小老师击晕命中扣 2 HP，HP 清零直接感染；猎手击杀的老师永久出局不复活，老师全灭=学生立即获胜\n" +
-                "· 数值改动（房主）即时同步全员\n" +
-                "· 房主本机数值持久化在 LocalLow Configs/biochem/biochem.json";
         }
 
         // 克隆设置窗口的窗框节点：剥掉游戏逻辑脚本只留引擎视觉件，页签等残件藏掉，
@@ -545,13 +524,11 @@ namespace BioChem
                 if (f.MinusBtn != null) f.MinusBtn.interactable = editable;
                 if (f.PlusBtn != null) f.PlusBtn.interactable = editable;
             }
-
-            if (rulesText != null) rulesText.text = BuildRulesText();
         }
 
         // ===== 嵌入游戏设置窗口的页内容 =====
 
-        // 嵌入成功后调用：在游戏设置面板的 RectTransform 里竖排 状态 + 开关 + 步进器网格 + 规则。
+        // 嵌入成功后调用：在游戏设置面板的 RectTransform 里竖排 状态 + 开关 + 步进器网格。
         // 构建件与自建面板完全一致（NumFields/Adjust 共用，只是宿主换了）
         internal static void BuildEmbeddedPage(Transform parent, float w, float h)
         {
@@ -572,32 +549,27 @@ namespace BioChem
             hostToggleLabel = hostToggle.GetComponentInChildren<Text>();
             hostToggleLabel.fontSize = Mathf.Max(16, baseFontSize - 4); // 状态文案较长，缩一号铺满整行
 
-            // 网格必须有独立容器：BuildGrid 从容器顶部往下排，直接挂面板根会压住状态行和开关
+            // 网格必须有独立容器：BuildGrid 从容器顶部往下排，直接挂面板根会压住状态行和开关。
+            // 玩法规则长文案已删（超出屏幕），整个下部高度都给步进器网格
             float gridTop = 108f;
-            float rulesH = Mathf.Max(150f, h * 0.28f);
-            float gridH = Mathf.Max(240f, h - gridTop - 8f - rulesH);
+            float gridH = Mathf.Max(240f, h - gridTop - 8f);
             var gridGo = new GameObject("数值网格", typeof(RectTransform));
             gridGo.transform.SetParent(parent, false);
             Place(gridGo.GetComponent<RectTransform>(), new Vector2(0f, 1f), new Vector2(0f, 1f),
                 new Vector2(innerW, gridH), new Vector2(pad, -gridTop));
-            float usedH = BuildGrid(gridGo.transform, innerW, gridH);
-
-            rulesText = NewText(parent, "规则", "", baseFontSize - 4, TextAnchor.UpperLeft, bodyInk);
-            Place(rulesText.rectTransform, new Vector2(0f, 1f), new Vector2(0f, 1f),
-                new Vector2(innerW, Mathf.Max(100f, h - gridTop - usedH - 12f)), new Vector2(pad, -gridTop - usedH - 8f));
-            rulesText.verticalOverflow = VerticalWrapMode.Overflow;
+            BuildGrid(gridGo.transform, innerW, gridH);
         }
 
         // ===== 控件辅助 =====
 
-        // 带文字的按钮：尺寸/位置由调用方 Place 覆盖
-        private static Button NewButton(Transform parent, string name, string label, Color fallbackColor, Vector2 size, Action onClick)
+        // 带文字的按钮：尺寸/位置由调用方 Place 覆盖；fontSize 可选（小格子按钮的字必须跟着缩，否则被截没）
+        private static Button NewButton(Transform parent, string name, string label, Color fallbackColor, Vector2 size, Action onClick, int? fontSize = null)
         {
             Image img = NewImage(parent, name, btnSprite, fallbackColor);
             Place(img.rectTransform, new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), size, Vector2.zero);
             Button btn = img.gameObject.AddComponent<Button>();
             btn.transition = Selectable.Transition.ColorTint;
-            Text t = NewText(img.transform, "文字", label, Mathf.Max(16, baseFontSize - 2), TextAnchor.MiddleCenter, bodyInk);
+            Text t = NewText(img.transform, "文字", label, fontSize ?? Mathf.Max(16, baseFontSize - 2), TextAnchor.MiddleCenter, bodyInk);
             Stretch(t.rectTransform);
             if (onClick != null) btn.onClick.AddListener(() => onClick());
             return btn;

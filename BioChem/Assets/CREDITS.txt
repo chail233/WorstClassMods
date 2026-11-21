@@ -1,5 +1,15 @@
-AK47 模型：ak47.obj — OpenGameArt "Low Poly Weapon Pack"（CC0 公有领域，无需署名）
-  https://opengameart.org/content/low-poly-weapon-pack
-枪声音效：ak47_shot.wav — 裁剪自 OpenGameArt "Gunshot Sounds" 的 SKS 单发
+AK47/手枪/军刀模型：来自 CS 1.6（v_ak47.mdl / p_deagle.mdl / v_knife.mdl，经 Tools/mdl2obj.py 转换为 OBJ+RAW 贴图）
+  ⚠️ Valve 版权资产：仅限本地自用；公开发布到创意工坊前建议替换回 CC0 素材
+  （删除对应 .obj/.raw 后 mod 自动回退：AK47/手枪=程序化拼装，军刀=程序化弯刃）
+AK47/手枪/军刀贴图：同上（CS 1.6 模型内嵌 256 色调色板贴图，转换时提取为 RAW）
+AK47 开火音效：ak47_shot.wav — CS 1.6 cstrike/sound/weapons/sg552-2.wav（Valve 版权资产，同上限制）
+军刀造型说明：CS 1.6 无库克里弯刀，v_knife 为原版直刃军刀；如需弯刀造型删除 kukri.obj 走程序化弯刃兜底
+AK47 开火音效（备用 CC0）：OpenGameArt "Gunshot Sounds" 裁剪自 SKS 单发
   作者 Vincent Sevedge，CC-BY 3.0 授权（本 mod 描述中已署名）
   https://opengameart.org/content/gunshot-sounds
+手枪模型（备用 CC0）：OpenGameArt "Low Poly Guns Pack"（Quaternius Ultimate Gun Pack 2019-07，CC0 公有领域，无需署名）
+  https://opengameart.org/content/low-poly-guns-pack
+AK47 模型（备用 CC0）：OpenGameArt "Low Poly Weapon Pack"（CC0 公有领域，无需署名）
+  https://opengameart.org/content/low-poly-weapon-pack
+手雷模型/爆炸特效/音效：复用游戏原生闪光弹资源（无外部素材）
+倒计时语音来源：爱给网

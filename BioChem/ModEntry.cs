@@ -19,16 +19,18 @@ namespace BioChem
     }
 
     /// <summary>
-    /// Kind: 2=Hit（S2C，原生吹箭命中的生化结算：扣血+减速；弹道/音效表现走游戏原生 ApplyHit）
-    /// 3=MgFire（C2S，连发吹箭的一发：带弹道参数，服务端注册 taserShots 后广播）
-    /// 4=MgShot（S2C，连发吹箭的弹体广播：各端 TaserProjectile.PlayFire 渲染，射手自己跳过——本地已预测渲染）
-    /// 5=AmmoSync（S2C，备弹同步：TargetUID=学生 TargetHp=剩余备弹；射击扣减/掏出/吃东西补弹后广播）
+    /// Kind: 2=Hit（S2C，原生吹箭命中的生化结算：扣血+减速；弹道/音效表现走游戏原生 ApplyHit；
+    /// 手雷爆炸的群体扣血也复用此 Kind 逐目标同步，SlowStacks 带目标当前权威层数=不碰减速）
+    /// 3=MgFire（C2S，主/副武器的一发：带弹道参数，服务端注册 taserShots 后广播；AK 与手枪按弹体 UID 高位区分）
+    /// 4=MgShot（S2C，弹体广播：各端 TaserProjectile.PlayFire 渲染，射手自己跳过——本地已预测渲染）
+    /// 5=AmmoSync（S2C，AK 备弹同步：TargetUID=学生 TargetHp=剩余备弹；射击扣减/掏出/吃东西补弹后广播）
     /// 6=EatRefill（C2S，吃完一份食物上报补弹；服务端冷却校验）
-    /// 弹体 UID 是高位虚拟 UID（VirtualShotUidBase 起），绝不与真实 unit UID 撞。
+    /// 7=PistolAmmoSync（S2C，手枪备弹同步：TargetUID=学生 TargetHp=剩余备弹）
+    /// 弹体 UID 是高位虚拟 UID（AK=0x6000… / 手枪=0x7000…），绝不与真实 unit UID 撞。
     /// </summary>
     public struct BioChemDartMessage : NetworkMessage
     {
-        public const byte Hit = 2, MgFire = 3, MgShot = 4, AmmoSync = 5, EatRefill = 6;
+        public const byte Hit = 2, MgFire = 3, MgShot = 4, AmmoSync = 5, EatRefill = 6, PistolAmmoSync = 7;
         public byte Kind;
         public ulong TargetUID;    // Hit=目标玩家 / MgFire·MgShot=虚拟弹体 UID
         public int TargetHp;       // Hit 用
@@ -86,6 +88,38 @@ namespace BioChem
         public ulong AttackerUID;  // Hit 用：猎手攻击=攻击者 UID（本机预测过音效就不再播广播音效）
     }
 
+    /// <summary>学生近战尼泊尔军刀。Kind: 1=LightStrike（C2S，左键轻击，可长按连击） 2=HeavyStrike（C2S，右键重击）
+    /// 3=Swing（S2C，挥刀广播：UnitUID=攻击者，Heavy=重击；攻击者本地已预测，身体动画走 PlayAnimSync 原生同步）
+    /// 4=Hit（S2C，扣血结算：UnitUID=目标 Hp=剩余 HP，AttackerUID=攻击者防双响）
+    /// 命中判定在挥刀动作末端：服务端收到 Strike 先广播 Swing，延迟 HitDelay 秒后才做扇形判定（CF 军刀手感）</summary>
+    public struct BioChemMeleeMessage : NetworkMessage
+    {
+        public const byte LightStrike = 1, HeavyStrike = 2, Swing = 3, Hit = 4;
+        public byte Kind;
+        public bool Heavy;         // Swing 用：是否重击（挥刀表现更慢更大）
+        public ulong UnitUID;      // Strike/Swing=攻击者 / Hit=目标
+        public int Hp;             // Hit 用
+        public Vector3 Origin;     // Strike 用：出手瞬间位置（服务端 5m 伪造门槛）
+        public Vector3 Direction;  // Strike 用：出手瞬间准星方向（挥刀末端以服务端权威位置+此方向判定）
+        public ulong AttackerUID;  // Hit 用：攻击者 UID
+    }
+
+    /// <summary>生化手雷（每人最多 1 颗，服务端权威）。Kind: 1=Throw（C2S） 2=Spawn（S2C，出生参数广播给其他端本地模拟）
+    /// 3=Explode（S2C，服务端权威爆炸点：各端销毁本地模拟弹体+爆炸表现；扣血已由服务端结算并经 Dart/Hit 逐目标同步）
+    /// 4=CountSync（S2C，手雷数同步：Count ∈ [0,1]，投掷扣减/吃东西补回后广播）
+    /// Seq 每玩家单调递增，用于匹配销毁各端本地模拟的弹体</summary>
+    public struct BioChemGrenadeMessage : NetworkMessage
+    {
+        public const byte Throw = 1, Spawn = 2, Explode = 3, CountSync = 4;
+        public byte Kind;
+        public ulong UserUID;
+        public uint Seq;
+        public int Count;          // CountSync 用
+        public Vector3 Origin;     // Throw/Spawn 用：出手点
+        public Vector3 Velocity;   // Throw/Spawn 用：出手速度
+        public Vector3 Position;   // Explode 用：服务端权威爆炸点
+    }
+
     [Serializable]
     public class BioChemStateDto
     {
@@ -99,6 +133,13 @@ namespace BioChem
         public List<float> stVals = new List<float>();
         public List<long> evolutionUids = new List<long>();
         public List<int> evolutionStages = new List<int>();
+        // 武器栏（全员槽位视图，远端世界模型显隐；中途加入自愈）
+        public List<long> slotUids = new List<long>();
+        public List<int> slotVals = new List<int>();
+        public List<long> pistolUids = new List<long>();   // 手枪备弹
+        public List<int> pistolVals = new List<int>();
+        public List<long> grenadeUids = new List<long>();  // 手雷数 ∈ [0,1]
+        public List<int> grenadeVals = new List<int>();
         public string cfg;  // 房主数值配置全量 JSON，客机应用后各端行为/显示一致
     }
 
@@ -196,6 +237,36 @@ namespace BioChem
         private static readonly FieldInfo TaserShotsField =
             AccessTools.Field(typeof(UnitMessageHandler), "taserShots");
 
+        // ===== 副武器手枪（按 2）：与 AK 共用嘴叼 Taser 承载物与原生弹道管线，备弹/节奏/伤害独立 =====
+        private static readonly Dictionary<ulong, int> pistolAmmo = new Dictionary<ulong, int>(); // 服务端权威手枪备弹（懒初始化为满）
+        private static int selfPistolAmmo;        // 本地手枪备弹（PistolAmmoSync 校准；清局重置为满）
+        private static uint pistolShotSeq;        // 手枪虚拟弹体序号
+        // 手枪虚拟弹体 UID 高位标记（bit60 置位 0b0111；仍通过 IsModDartUid 的 0b1110 掩码——命中结算与 AK 同管线）
+        private const ulong PistolShotUidBase = 0x7000000000000000UL;
+        private static bool renderingPistolShot;  // 本次 PlayFire 是手枪弹体（枪声劫持分支）
+
+        // ===== 学生近战尼泊尔军刀（按 3）：命中判定在挥刀末端，服务端延迟判定 =====
+        internal const float KukriSlashAngle = 120f; // 军刀扇形总角度（与猎手同款正面群体判定）
+        private sealed class PendingStrike { public ulong attacker; public Vector3 direction; public bool heavy; public double executeAt; }
+        private static readonly List<PendingStrike> pendingStrikes = new List<PendingStrike>(); // 服务端延迟判定表
+        private static readonly Dictionary<ulong, float> kukriLightReadyAt = new Dictionary<ulong, float>(); // 服务端轻击连击冷却
+        private static readonly Dictionary<ulong, float> kukriHeavyReadyAt = new Dictionary<ulong, float>(); // 服务端重击冷却
+        private sealed class PendingLocalFeedback { public float executeAt; public int damage; public bool heavy; }
+        private static readonly List<PendingLocalFeedback> localFeedbacks = new List<PendingLocalFeedback>(); // 本地预测反馈（挥刀末端出）
+        private static float localKukriLightReadyAt;
+        private static float localKukriHeavyReadyAt;
+        private static bool localKukriHeavyHeld;  // 右键边沿检测
+
+        // ===== 投掷物生化手雷（按 4）：每人最多 1 颗，引信到点服务端权威爆炸 =====
+        internal const int GrenadeMaxCount = 1;
+        private const float GrenadeThrowInterval = 0.5f;
+        private const float GrenadeEdgeDamageFraction = 0.4f; // 爆炸伤害随距离线性衰减到该比例（半径边缘）
+        private static readonly Dictionary<ulong, int> grenadeCount = new Dictionary<ulong, int>(); // 服务端权威 ∈[0,1]（懒初始化=1）
+        private static readonly Dictionary<ulong, float> grenadeThrowReadyAt = new Dictionary<ulong, float>(); // 服务端投掷限频
+        private static int selfGrenadeCount = GrenadeMaxCount; // 本地手雷数（CountSync 校准）
+        private static uint grenadeSeq;           // 本地出手序号（Spawn/Explode 匹配销毁）
+        private static float localGrenadeReadyAt;
+
         // ===== 入口 =====
 
         public void OnLoad(ModContext context)
@@ -203,7 +274,9 @@ namespace BioChem
             Log = context.Log;
             ModDirectory = context.ModDirectory;
             BioChemConfig.Load(context.ConfigDirectory, Log);
-            Ak47Weapon.Init(ModDirectory); // 曳光弹换装 + AK 枪声预载（内部懒重试）
+            Ak47Weapon.Init(ModDirectory);  // 曳光弹换装 + AK 枪声预载（内部懒重试）
+            PistolWeapon.Init(ModDirectory);
+            StudentKukri.Init(ModDirectory);
             var harmony = new Harmony(HarmonyId);
             try
             {
@@ -274,9 +347,9 @@ namespace BioChem
                     postfix: new HarmonyMethod(typeof(ModEntry), "RegisterClient"));
                 harmony.Patch(AccessTools.Method(typeof(RoomManager), "RegisterServerMessageHandlers"),
                     postfix: new HarmonyMethod(typeof(ModEntry), "RegisterServer"));
-                // PlayFire 生成 AK 弹体时，用枪声替换原生发射音效。
+                // PlayFire 生成弹体时，用真枪声替换原生发射音效（AK/手枪按弹体高位 UID 分支）。
                 harmony.Patch(AccessTools.Method(typeof(AudioManager), "PlayOneShotAtPosition"),
-                    prefix: new HarmonyMethod(typeof(ModEntry), nameof(BeforeAkLaunchSound)));
+                    prefix: new HarmonyMethod(typeof(ModEntry), nameof(BeforeModLaunchSound)));
                 Writer<BioChemStateMessage>.write = BioChemPump.WriteState;
                 Reader<BioChemStateMessage>.read = BioChemPump.ReadState;
                 Writer<BioChemDartMessage>.write = BioChemPump.WriteDart;
@@ -289,6 +362,10 @@ namespace BioChem
                 Reader<BioChemWriteMessage>.read = BioChemPump.ReadWrite;
                 Writer<BioChemDownMessage>.write = BioChemPump.WriteDown;
                 Reader<BioChemDownMessage>.read = BioChemPump.ReadDown;
+                Writer<BioChemMeleeMessage>.write = BioChemPump.WriteMelee;
+                Reader<BioChemMeleeMessage>.read = BioChemPump.ReadMelee;
+                Writer<BioChemGrenadeMessage>.write = BioChemPump.WriteGrenade;
+                Reader<BioChemGrenadeMessage>.read = BioChemPump.ReadGrenade;
                 RegisterClient();
                 RegisterServer();
 
@@ -558,27 +635,116 @@ namespace BioChem
             selfDartAmmo = Mathf.Max(0, message.TargetHp);
             Ak47Weapon.OnAmmoSynced(); // 备弹权威校准：弹匣 clamp 到备弹内（备弹空则取消换弹）
             if (before >= 0 && selfDartAmmo > before)
-                NotifySelf("食物补充了吹箭弹药：" + selfDartAmmo + "/" + Config.dartMaxAmmo);
+                NotifySelf("食物补充了 AK47 备弹：" + selfDartAmmo + "/" + Config.dartMaxAmmo);
         }
 
-        // 吃完一份食物 → 服务端补弹（冷却防伪：吃完一份食物至少要吃几秒，刷不了）
+        // ===== 手枪备弹（服务端权威，与 AK 备弹同套路） =====
+
+        private static int GetPistolAmmo(ulong uid)
+        {
+            if (!pistolAmmo.TryGetValue(uid, out int value)) return pistolAmmo[uid] = Config.pistolMaxAmmo;
+            return value;
+        }
+
+        private static void BroadcastPistolAmmo(ulong uid)
+        {
+            var sync = new BioChemDartMessage { Kind = BioChemDartMessage.PistolAmmoSync, TargetUID = uid, TargetHp = GetPistolAmmo(uid) };
+            Broadcast(sync);
+            ApplyPistolAmmoSyncLocal(sync);
+        }
+
+        private static void ApplyPistolAmmoSyncLocal(BioChemDartMessage message)
+        {
+            if (!UnitManager.IsSingletonActive() || message.TargetUID != UnitManager.Instance.localPlayerUID) return;
+            int before = selfPistolAmmo;
+            selfPistolAmmo = Mathf.Max(0, message.TargetHp);
+            PistolWeapon.OnAmmoSynced();
+            if (before >= 0 && selfPistolAmmo > before)
+                NotifySelf("食物补充了手枪弹药：" + selfPistolAmmo + "/" + Config.pistolMaxAmmo);
+        }
+
+        internal static int SelfPistolAmmo => selfPistolAmmo;
+        internal static int SelfGrenadeCount => selfGrenadeCount;
+
+        // 手雷数视图（CountSync/快照对齐；无记录=从未变过=初始满 1 颗）——远端手持模型显隐用
+        internal static int GrenadeCountView(ulong uid)
+            => grenadeCount.TryGetValue(uid, out int value) ? value : GrenadeMaxCount;
+
+        // ===== 手雷数量（服务端权威 ∈ [0, GrenadeMaxCount]，懒初始化=每人初始自带 1 颗） =====
+
+        private static int GetGrenadeCount(ulong uid)
+        {
+            if (!grenadeCount.TryGetValue(uid, out int value)) return grenadeCount[uid] = GrenadeMaxCount;
+            return value;
+        }
+
+        private static void BroadcastGrenadeCount(ulong uid)
+        {
+            var sync = new BioChemGrenadeMessage { Kind = BioChemGrenadeMessage.CountSync, UserUID = uid, Count = GetGrenadeCount(uid) };
+            Broadcast(sync);
+            ApplyGrenadeCountLocal(sync);
+        }
+
+        private static void ApplyGrenadeCountLocal(BioChemGrenadeMessage message)
+        {
+            grenadeCount[message.UserUID] = Mathf.Clamp(message.Count, 0, GrenadeMaxCount);
+            if (UnitManager.IsSingletonActive() && message.UserUID == UnitManager.Instance.localPlayerUID)
+            {
+                int before = selfGrenadeCount;
+                selfGrenadeCount = Mathf.Clamp(message.Count, 0, GrenadeMaxCount);
+                if (before >= 0 && selfGrenadeCount > before)
+                    NotifySelf("补回了一颗生化手雷！");
+            }
+        }
+
+        // 吃完一份食物 → 服务端三选一随机补：AK 备弹 / 手枪备弹 / 手雷（CF 生化吃补给节奏）。
+        // 已满的选项吃掉=浪费（与原"满弹静默吃掉"口径一致）；冷却防伪不变
         private static void OnServerEatRefill(NetworkConnectionToClient connection)
         {
-            if (!NetRuntime.IsServer || !enabled || !ServerClassActive() || Config.dartAmmoPerFood <= 0) return;
+            if (!NetRuntime.IsServer || !enabled || !ServerClassActive()) return;
             ulong sender = ResolveSender(connection);
-            if (sender == 0 || infected.Contains(sender)) return; // 感染者没有吹箭筒
+            if (sender == 0 || infected.Contains(sender)) return; // 感染者没有武器
             if (Time.unscaledTime < (foodRefillReadyAt.TryGetValue(sender, out float readyAt) ? readyAt : 0f)) return;
             if (!UnitManager.IsSingletonActive()) return;
             Unit student = UnitManager.Instance.GetUnitByUID(sender);
             if (student == null || !student.isActived || student.IsDead || !student.IsStudent) return;
             foodRefillReadyAt[sender] = Time.unscaledTime + FoodRefillCooldown;
-            if (GetDartAmmo(sender) >= Config.dartMaxAmmo) return; // 满弹：静默吃掉
-            dartAmmo[sender] = Mathf.Min(Config.dartMaxAmmo, GetDartAmmo(sender) + Config.dartAmmoPerFood);
-            BroadcastAmmo(sender);
-            Log("[状态] " + GetName(sender) + " 吃东西补充吹箭弹药至 " + dartAmmo[sender] + "/" + Config.dartMaxAmmo);
+            int roll = UnityEngine.Random.Range(0, 3);
+            if (roll == 0)
+            {
+                if (Config.dartAmmoPerFood <= 0 || GetDartAmmo(sender) >= Config.dartMaxAmmo) return;
+                dartAmmo[sender] = Mathf.Min(Config.dartMaxAmmo, GetDartAmmo(sender) + Config.dartAmmoPerFood);
+                BroadcastAmmo(sender);
+                Log("[状态] " + GetName(sender) + " 吃东西补充 AK47 备弹至 " + dartAmmo[sender] + "/" + Config.dartMaxAmmo);
+            }
+            else if (roll == 1)
+            {
+                if (Config.pistolAmmoPerFood <= 0 || GetPistolAmmo(sender) >= Config.pistolMaxAmmo) return;
+                pistolAmmo[sender] = Mathf.Min(Config.pistolMaxAmmo, GetPistolAmmo(sender) + Config.pistolAmmoPerFood);
+                BroadcastPistolAmmo(sender);
+                Log("[状态] " + GetName(sender) + " 吃东西补充手枪备弹至 " + pistolAmmo[sender] + "/" + Config.pistolMaxAmmo);
+            }
+            else
+            {
+                if (GetGrenadeCount(sender) >= GrenadeMaxCount) return;
+                grenadeCount[sender] = GrenadeMaxCount;
+                BroadcastGrenadeCount(sender);
+                Log("[状态] " + GetName(sender) + " 吃东西补回了一颗生化手雷");
+            }
         }
 
-        internal static ulong EnsureAkEquipped(Unit student)
+        internal static ulong EnsureAkEquipped(Unit student) => EnsureGunEquipped(student);
+
+        // 主/副武器共用嘴叼 Taser 承载物（表现层按当前槽位分别画 AK/手枪，弹道管线同一套）
+        internal static ulong EnsurePistolEquipped(Unit student) => EnsureGunEquipped(student);
+
+        // 近战军刀无实体物品：纯客户端表现（StudentKukri 按全员槽位广播驱动），返回 0=不发放
+        internal static ulong EnsureMeleeEquipped(Unit student) => 0;
+
+        // 手雷无实体物品：数量走服务端权威计数（GrenadeMessage.CountSync），返回 0=不发放
+        internal static ulong EnsureGrenadeEquipped(Unit student) => 0;
+
+        private static ulong EnsureGunEquipped(Unit student)
         {
             ulong uid = student.UID;
             var mouth = student.GetComponent<MouthItemUseComponent>();
@@ -609,12 +775,13 @@ namespace BioChem
                 // 先向持有者确认物品 UID，再由 Tick 挂载，避免挂载和确认之间走原生单发。
                 pendingEquip[item.UID] = (uid, Time.unscaledTime + 5f);
                 BroadcastAmmo(uid);
+                BroadcastPistolAmmo(uid); // 两把枪的备弹都随掏枪广播一遍（懒初始化对齐）
                 return item.UID;
             }
             catch (Exception e)
             {
                 RevokeTaser(uid);
-                Log("装备 AK47 失败：" + e.Message);
+                Log("装备武器失败：" + e.Message);
                 return 0;
             }
         }
@@ -688,19 +855,20 @@ namespace BioChem
 
         // ===== AK47 客户端造弹循环 =====
 
-        // 本地玩家按住左键连发：构造准星弹道，按虚拟 UID 本地渲染 + C2S 上报。
+        // 本地玩家按住左键连发（主武器 AK47 / 副武器手枪共用循环）：构造准星弹道，按虚拟 UID 本地渲染 + C2S 上报。
         // 射手自己不发 S2C 回包（本地已预测渲染），服务端广播给其他端渲染
-        private static void TickMachineGun()
+        private static void TickGunFire()
         {
-            if (!enabled || StudentWeapons.Selected != StudentWeaponSlot.Primary || !CanClassAct()) return;
+            bool pistol = StudentWeapons.Selected == StudentWeaponSlot.Secondary;
+            if (!enabled || (!pistol && StudentWeapons.Selected != StudentWeaponSlot.Primary) || !CanClassAct()) return;
             if (!Input.GetMouseButton(0)) return; // 按住左键
-            if (Ak47Weapon.BlockFire()) return;   // 换弹中/空匣不发（空匣且还有备弹时按住扳机自动换弹）
+            if (pistol ? PistolWeapon.BlockFire() : Ak47Weapon.BlockFire()) return; // 换弹中/空匣不发（空匣且有备弹时自动换弹）
             if (Time.unscaledTime < mgNextFireAt) return;
-            if (selfDartAmmo <= 0) return; // 备弹耗尽（服务端 AmmoSync 权威校准，本地先扣保证手感）
+            if (pistol ? SelfPistolAmmo <= 0 : selfDartAmmo <= 0) return; // 备弹耗尽（服务端 AmmoSync 权威校准，本地先扣保证手感）
             Unit self = UnitManager.Instance.localPlayer;
             if (!StudentWeapons.CanSelect(self) || self.IsStun) return;
             Unit mouthItem = self.GetComponent<MouthItemUseComponent>()?.currentMouthItem;
-            if (!StudentWeapons.IsLocalAk(mouthItem) || !mouthItem.isActived) return;
+            if (!StudentWeapons.IsLocalGun(mouthItem) || !mouthItem.isActived) return;
             TaserComponent taser = mouthItem.GetComponent<TaserComponent>();
             if (taser == null || TaserTryBuildShotMethod == null) return;
             if (!MonoSingletonT<SceneManager>.IsSingletonActive()) return;
@@ -710,21 +878,23 @@ namespace BioChem
             var args = new object[] { self, cam.transform, null };
             if (!(TaserTryBuildShotMethod.Invoke(taser, args) is bool ok) || !ok) return;
             var shot = (TaserFired_S2C)args[2];
-            AimAkShot(cam, ref shot);
+            AimGunShot(cam, ref shot, pistol ? PistolWeapon.GetMuzzleWorldPos : (Func<Vector3, Vector3>)Ak47Weapon.GetMuzzleWorldPos);
 
-            mgNextFireAt = Time.unscaledTime + Config.fireInterval;
-            if (selfDartAmmo > 0) selfDartAmmo--; // 本地乐观扣减，服务端 AmmoSync 随后校准
-            // 虚拟弹体 UID：bit62-61 高位标记 + bit60-32 玩家 UID（截 29 位）+ bit31-0 序号，
+            mgNextFireAt = Time.unscaledTime + (pistol ? Config.pistolFireInterval : Config.fireInterval);
+            if (pistol) { if (SelfPistolAmmo > 0) selfPistolAmmo--; } // 本地乐观扣减，服务端 PistolAmmoSync 随后校准
+            else if (selfDartAmmo > 0) selfDartAmmo--;
+            // 虚拟弹体 UID：bit62-61 高位标记（AK=0x6000… / 手枪=0x7000… bit60）+ bit60-32 玩家 UID（截 29 位）+ bit31-0 序号，
             // 绝不与真实 unit UID 撞；间隔小于弹体飞行时间时弹体重叠，唯一 UID 保证注册/命中/销毁互不干扰
-            ulong shotUid = VirtualShotUidBase
+            ulong shotUid = (pistol ? PistolShotUidBase : VirtualShotUidBase)
                 | ((self.UID & 0x1FFFFFFFUL) << 32)
-                | (uint)(++mgShotSeq);
+                | (uint)(pistol ? ++pistolShotSeq : ++mgShotSeq);
             shot.accepted = true;
             shot.userUID = self.UID;
             shot.itemUID = shotUid;
 
-            PlayFireShot(shot); // 本地预测渲染（曳光弹已换装为 AK 曳光）
-            Ak47Weapon.OnShotFired(); // 弹匣-1 + 口焰 + 后坐
+            PlayFireShot(shot); // 本地预测渲染（曳光弹已换装，AK/手枪共用）
+            if (pistol) PistolWeapon.OnShotFired(); // 弹匣-1 + 口焰 + 后坐
+            else Ak47Weapon.OnShotFired();
             var msg = new BioChemDartMessage
             {
                 Kind = BioChemDartMessage.MgFire,
@@ -741,7 +911,7 @@ namespace BioChem
             else if (RoomManager.IsSingletonActive()) RoomManager.Instance.SendToServer(msg);
         }
 
-        private static void AimAkShot(Camera camera, ref TaserFired_S2C shot)
+        private static void AimGunShot(Camera camera, ref TaserFired_S2C shot, Func<Vector3, Vector3> muzzleWorldPos)
         {
             Ray aimRay = camera.ScreenPointToRay(new Vector3(Screen.width * 0.5f, Screen.height * 0.5f, 0f));
             Vector3 aimDelta = aimRay.direction * shot.range;
@@ -752,7 +922,7 @@ namespace BioChem
             Vector3 aimPoint = akBallistics.TryHit(aimRay.origin, aimDelta, 0.001f, mask, Accepts, out _, out Vector3 hitPoint)
                 ? hitPoint : aimRay.origin + aimDelta;
 
-            Vector3 muzzle = Ak47Weapon.GetMuzzleWorldPos(shot.origin);
+            Vector3 muzzle = muzzleWorldPos(shot.origin);
             Vector3 toMuzzle = muzzle - shot.origin;
             // 贴墙时把起点留在遮挡的近侧；准星目标太近时沿用原生起点，避免枪口后方的目标引起倒射。
             if (akBallistics.TryHit(shot.origin, toMuzzle, shot.radius, mask, Accepts, out _, out Vector3 blockedAt))
@@ -767,14 +937,18 @@ namespace BioChem
 
         private static void PlayFireShot(TaserFired_S2C shot)
         {
-            bool wasRenderingAkShot = renderingAkShot;
-            renderingAkShot = true;
+            bool pistol = IsPistolShotUid(shot.itemUID); // 弹体高位 UID 分枪声（AK/手枪共用 PlayFire 渲染）
+            bool wasAk = renderingAkShot, wasPistol = renderingPistolShot;
+            renderingAkShot = !pistol;
+            renderingPistolShot = pistol;
             try { TaserPlayFireMethod?.Invoke(null, new object[] { shot }); }
-            finally { renderingAkShot = wasRenderingAkShot; }
+            finally { renderingAkShot = wasAk; renderingPistolShot = wasPistol; }
         }
 
-        public static bool BeforeAkLaunchSound(AudioEvents eventName, Vector3 position)
+        public static bool BeforeModLaunchSound(AudioEvents eventName, Vector3 position)
         {
+            if (renderingPistolShot && eventName == ConfigManager.TaserSetting.launchSound)
+                return !PistolWeapon.TryPlayShotAt(position); // 手枪弹体换手枪声（AK 声变调兜底在 PistolWeapon 内部）
             return !renderingAkShot || eventName != ConfigManager.TaserSetting.launchSound
                 || !Ak47Weapon.TryPlayShotAt(position);
         }
@@ -797,7 +971,8 @@ namespace BioChem
 
         // ===== 连发吹箭筒：服务端结算 =====
 
-        // 校验后把这一发注册进原生 taserShots（命中校验/眩晕/Hit 广播全走原生），再广播弹体渲染
+        // 校验后把这一发注册进原生 taserShots（命中校验/眩晕/Hit 广播全走原生），再广播弹体渲染。
+        // 按射手当前槽位分支：主武器=AK47 节奏/备弹，副武器=手枪节奏/备弹（同一嘴叼承载物）
         private static void OnServerMgFire(NetworkConnectionToClient connection, BioChemDartMessage message)
         {
             if (!NetRuntime.IsServer || message.Kind != BioChemDartMessage.MgFire) return;
@@ -805,23 +980,25 @@ namespace BioChem
             {
                 if (!enabled || !ServerClassActive() || !UnitManager.IsSingletonActive()) return;
                 ulong sender = ResolveSender(connection);
-                if (sender == 0 || infected.Contains(sender)) return; // 感染者没有吹箭筒
+                if (sender == 0 || infected.Contains(sender)) return; // 感染者没有武器
+                bool pistol = StudentWeapons.ServerSelectionOf(sender) == StudentWeaponSlot.Secondary;
                 if (Time.unscaledTime < (mgFireUntil.TryGetValue(sender, out float until) ? until : 0f)) return;
                 if (message.TargetUID < VirtualShotUidBase) return; // 虚拟 UID 必须带高位标记
-                if (GetDartAmmo(sender) <= 0) return; // 备弹耗尽：服务端拒发（客户端 UI 已提示吃东西补弹）
+                if (pistol ? GetPistolAmmo(sender) <= 0 : GetDartAmmo(sender) <= 0) return; // 备弹耗尽：服务端拒发
                 if (float.IsNaN(message.Origin.x) || float.IsInfinity(message.Origin.x)
                     || float.IsNaN(message.Direction.x) || float.IsInfinity(message.Direction.x)) return;
                 float dirMag = message.Direction.sqrMagnitude;
                 if (dirMag < 0.5f || dirMag > 1.5f || message.Speed <= 0f || message.Range <= 0f || message.Radius <= 0f) return;
-                // 射手嘴上必须真挂着吹箭（防伪造）
+                // 射手嘴上必须真挂着已发放的承载物（防伪造）
                 Unit shooter = UnitManager.Instance.GetUnitByUID(sender);
                 Unit mouthItem = shooter != null && shooter.isActived && !shooter.IsDead && shooter.IsStudent
                     ? shooter.GetComponent<MouthItemUseComponent>()?.currentMouthItem : null;
                 if (mouthItem == null || !mouthItem.isActived || !issuedTaser.TryGetValue(sender, out ulong itemUid)
                     || mouthItem.UID != itemUid) return;
 
-                mgFireUntil[sender] = Time.unscaledTime + Config.fireInterval;
-                dartAmmo[sender] = GetDartAmmo(sender) - 1;
+                mgFireUntil[sender] = Time.unscaledTime + (pistol ? Config.pistolFireInterval : Config.fireInterval);
+                if (pistol) pistolAmmo[sender] = GetPistolAmmo(sender) - 1;
+                else dartAmmo[sender] = GetDartAmmo(sender) - 1;
                 RecordTaserShot(message.TargetUID, sender, message.StunDuration, message.Range, message.Speed);
                 PlayFireShot(BuildShot(message)); // 服务器本机渲染（host 视角）；host 射手时 PlayFire 去重跳过
                 Broadcast(new BioChemDartMessage
@@ -836,7 +1013,8 @@ namespace BioChem
                     Radius = message.Radius,
                     StunDuration = message.StunDuration
                 });
-                BroadcastAmmo(sender); // 每发校准射手端备弹，防网络抖动下与本地乐观扣减漂移
+                if (pistol) BroadcastPistolAmmo(sender); // 每发校准射手端备弹，防网络抖动下与本地乐观扣减漂移
+                else BroadcastAmmo(sender);
             }
             catch (Exception e)
             {
@@ -890,6 +1068,12 @@ namespace BioChem
             return (uid & 0xE000000000000000UL) == VirtualShotUidBase;
         }
 
+        // 手枪的虚拟弹体 UID（bit60 置位 0b0111；仍通过 IsModDartUid 的 0b1110 掩码——命中结算与 AK 同管线）
+        private static bool IsPistolShotUid(ulong uid)
+        {
+            return (uid & 0xF000000000000000UL) == PistolShotUidBase;
+        }
+
         // prefix：记录这一发是否注册过 taserShots（原生校验通过才会注册）。
         // postfix 结算以此为门槛——被原生拒绝的弹（过期/未注册/伪造）不再扣血扣减速
         public static void BeforeTaserImpact(UnitMessageHandler __instance, TaserImpact_C2S impact)
@@ -925,11 +1109,23 @@ namespace BioChem
             if (hunters.Contains(target.UID) || killedTeachers.Contains(target.UID)) return; // 吹箭打不到猎手，出局的老师也不再结算
             if (!ServerClassActive()) return;
 
-                var expiries = PruneServerSlow(target.UID);
-                if (expiries.Count < Config.dartSlowMaxStacks) // 层数封顶，与服务端移速口径一致
-                    expiries.Add(Time.unscaledTime + Config.dartSlowSeconds);
-                byte stacks = (byte)Mathf.Min(Config.dartSlowMaxStacks, expiries.Count);
-                int damage = EffectiveDartDamage();
+                bool pistolShot = IsPistolShotUid(impact.itemUID);
+                int damage;
+                byte stacks;
+                if (pistolShot)
+                {
+                    // 手枪：固定伤害、无感染加成、不叠减速（SlowStacks 带当前权威层数回去，防误清已有减速）
+                    damage = Config.pistolDamage;
+                    stacks = (byte)PruneServerSlow(target.UID).Count;
+                }
+                else
+                {
+                    var expiries = PruneServerSlow(target.UID);
+                    if (expiries.Count < Config.dartSlowMaxStacks) // 层数封顶，与服务端移速口径一致
+                        expiries.Add(Time.unscaledTime + Config.dartSlowSeconds);
+                    stacks = (byte)Mathf.Min(Config.dartSlowMaxStacks, expiries.Count);
+                    damage = EffectiveDartDamage();
+                }
                 int newHp = GetHp(target.UID, !infected.Contains(target.UID)) - damage;
                 hp[target.UID] = Mathf.Max(0, newHp);
                 var hit = new BioChemDartMessage
@@ -940,7 +1136,10 @@ namespace BioChem
                 };
                 Broadcast(hit);
                 ApplyDartHit(hit);
-                Log("[状态] 吹箭命中 " + GetName(target.UID) + "（伤害 " + damage + "，感染加成 +" + (DartDamageBonus() * 100f).ToString("0") + "%），HP " + hp[target.UID] + "，减速 " + stacks + "/" + Config.dartSlowMaxStacks);
+                if (pistolShot)
+                    Log("[状态] 手枪命中 " + GetName(target.UID) + "（伤害 " + damage + "），HP " + hp[target.UID]);
+                else
+                    Log("[状态] 吹箭命中 " + GetName(target.UID) + "（伤害 " + damage + "，感染加成 +" + (DartDamageBonus() * 100f).ToString("0") + "%），HP " + hp[target.UID] + "，减速 " + stacks + "/" + Config.dartSlowMaxStacks);
                 if (hp[target.UID] <= 0) DownUnit(target.UID);
             }
             catch (Exception e)
@@ -1343,19 +1542,20 @@ namespace BioChem
         }
 
         // 扇形扫击目标收集（服务端判定与攻击者本地预测共用同一口径）：
-        // 老师阵营、非猎手、未出局、存活（晕眩可补刀）；水平距离 HunterAttackRange 内、
-        // 以 forward 为轴的 HunterSlashAngle 扇形内；贴脸（≈同位置）不做角度检查必中
-        private static void CollectSweepTargets(Unit hunter, Vector3 forward, List<Unit> results)
+        // 老师阵营、非猎手、未出局、存活（晕眩可补刀）；水平距离 range 内、
+        // 以 forward 为轴的 angle 扇形内（缺省=猎手数值）；贴脸（≈同位置）不做角度检查必中
+        private static void CollectSweepTargets(Unit hunter, Vector3 forward, List<Unit> results,
+            float range = HunterAttackRange, float angle = HunterSlashAngle)
         {
             results.Clear();
-            float maxDistSqr = HunterAttackRange * HunterAttackRange;
+            float maxDistSqr = range * range;
             foreach (Unit unit in UnitManager.Instance.playerList)
             {
                 if (!IsLivingTeacherOpponent(unit)) continue;
                 Vector3 to = unit.Position - hunter.Position;
                 to.y = 0f; // 水平距离判定：跳起/蹲下不影响挥刀命中
                 if (to.sqrMagnitude > maxDistSqr) continue;
-                if (to.sqrMagnitude > 0.0001f && Vector3.Angle(forward, to) > HunterSlashAngle * 0.5f) continue;
+                if (to.sqrMagnitude > 0.0001f && Vector3.Angle(forward, to) > angle * 0.5f) continue;
                 results.Add(unit);
             }
         }
@@ -1454,6 +1654,335 @@ namespace BioChem
             ClassroomManager.Instance.ClassEnd(false);
             Log("[状态] 老师阵营全灭，判学生胜利！");
             NotifyAll("老师阵营全灭，学生胜利！");
+        }
+
+        // ===== 学生近战尼泊尔军刀（按 3）=====
+        // 左键单击/长按连击=轻击；右键=重击（UseItem2 硬件级读法，跟随游戏改键）。
+        // CF 军刀手感核心：命中判定在挥刀动作末端——本地预测反馈与服务端扇形判定都延迟 HitDelay 秒
+
+        private static void TickStudentMelee()
+        {
+            if (!enabled || StudentWeapons.Selected != StudentWeaponSlot.Melee || !CanClassAct()) return;
+            if (!UnitManager.IsSingletonActive()) return;
+            Unit selfUnit = UnitManager.Instance.GetUnitByUID(UnitManager.Instance.localPlayerUID);
+            if (selfUnit == null || !selfUnit.isActived || selfUnit.IsDead || selfUnit.IsStun || !StudentWeapons.CanSelect(selfUnit)) return;
+            float now = Time.unscaledTime;
+
+            // 右键重击（边沿检测：这一帧按下）
+            bool heavyHeld = false;
+            if (MonoSingletonT<InputManager>.IsSingletonActive())
+                InputManager.Instance.TryGetUseControlPressed(eCmdType.UseItem2, out heavyHeld);
+            bool heavyPressed = heavyHeld && !localKukriHeavyHeld;
+            localKukriHeavyHeld = heavyHeld;
+            if (heavyPressed)
+            {
+                if (now >= localKukriHeavyReadyAt)
+                {
+                    localKukriHeavyReadyAt = now + Config.kukriHeavyCooldown;
+                    localKukriLightReadyAt = Mathf.Max(localKukriLightReadyAt, now + Config.kukriHeavyCooldown * 0.5f); // 重击动作期间轻击让路
+                    DoKukriStrike(selfUnit, heavy: true);
+                }
+                return;
+            }
+            // 左键单击/长按连击轻击
+            if (Input.GetMouseButton(0) && now >= localKukriLightReadyAt)
+            {
+                localKukriLightReadyAt = now + Config.kukriLightInterval;
+                DoKukriStrike(selfUnit, heavy: false);
+            }
+        }
+
+        private static void DoKukriStrike(Unit selfUnit, bool heavy)
+        {
+            selfUnit.GetComponent<AnimationComponent>()?.PlayAnimSync("Throw"); // 学生动画机 Throw 挥臂，原生同步全员可见
+            StudentKukri.PlaySwing(selfUnit.UID, heavy); // 本地预测：自己的刀先摆（viewmodel）
+            PlayHunterSound(AudioEvents.sfx_DoubaoSwordSwing_sfx, selfUnit.Position); // 挥砍音复用老师剑
+            Vector3 direction = Vector3.zero;
+            if (MonoSingletonT<SceneManager>.IsSingletonActive())
+            {
+                Camera cam = MonoSingletonT<SceneManager>.Instance.MainCamera;
+                if (cam != null) direction = cam.transform.forward;
+            }
+            // 本地预测反馈延迟到挥刀末端（与服务端判定时点一致），目标届时按同一口径重收集（CF：命中在动作末端跟手）
+            localFeedbacks.Add(new PendingLocalFeedback
+            {
+                executeAt = Time.unscaledTime + (heavy ? Config.kukriHeavyHitDelay : Config.kukriLightHitDelay),
+                damage = heavy ? Config.kukriHeavyDamage : Config.kukriLightDamage,
+                heavy = heavy
+            });
+            var message = new BioChemMeleeMessage
+            {
+                Kind = heavy ? BioChemMeleeMessage.HeavyStrike : BioChemMeleeMessage.LightStrike,
+                Origin = selfUnit.Position,
+                Direction = direction // 零向量时服务端兜底身体朝向
+            };
+            if (NetRuntime.IsServer) OnServerMelee(null, message);
+            else if (RoomManager.IsSingletonActive()) RoomManager.Instance.SendToServer(message);
+        }
+
+        // 挥刀末端出本地预测反馈：与服务器同一口径收集扇内目标（命中标记/浮字/震屏/命中音），伤害仍等服务端
+        private static void TickKukriFeedback()
+        {
+            if (localFeedbacks.Count == 0 || !UnitManager.IsSingletonActive()) return;
+            float now = Time.unscaledTime;
+            for (int i = localFeedbacks.Count - 1; i >= 0; i--)
+            {
+                if (now < localFeedbacks[i].executeAt) continue;
+                var feedback = localFeedbacks[i];
+                localFeedbacks.RemoveAt(i);
+                Unit self = UnitManager.Instance.GetUnitByUID(UnitManager.Instance.localPlayerUID);
+                if (self == null || !self.isActived) continue;
+                Vector3 forward = Vector3.zero;
+                if (MonoSingletonT<SceneManager>.IsSingletonActive())
+                {
+                    Camera cam = MonoSingletonT<SceneManager>.Instance.MainCamera;
+                    if (cam != null) { forward = cam.transform.forward; forward.y = 0f; }
+                }
+                if (forward.sqrMagnitude < 0.0001f) { forward = self.transform.forward; forward.y = 0f; }
+                forward.Normalize();
+                CollectSweepTargets(self, forward, sweepBuffer,
+                    feedback.heavy ? Config.kukriHeavyRange : Config.kukriLightRange, KukriSlashAngle);
+                foreach (Unit target in sweepBuffer)
+                {
+                    bool down = GetTeacherTeamHp(target.UID) <= feedback.damage; // 按当前权威 HP 预测击倒
+                    HunterFeedback.OnPredictedHit(target, down, feedback.damage, "击倒!");
+                    if (down) PlayKillSound(target.Position);
+                    else PlayHunterSound(AudioEvents.sfx_DoubaoSwordHit_sfx, target.Position);
+                }
+            }
+        }
+
+        // ===== 服务端：军刀结算 =====
+
+        private static void OnServerMelee(NetworkConnectionToClient connection, BioChemMeleeMessage message)
+        {
+            if (!NetRuntime.IsServer) return;
+            bool heavy = message.Kind == BioChemMeleeMessage.HeavyStrike;
+            if (message.Kind != BioChemMeleeMessage.LightStrike && !heavy) return;
+            try
+            {
+                if (!enabled || !ServerClassActive() || !UnitManager.IsSingletonActive()) return;
+                ulong sender = ResolveSender(connection);
+                if (sender == 0 || infected.Contains(sender) || hunters.Contains(sender)) return;
+                Unit attacker = UnitManager.Instance.GetUnitByUID(sender);
+                if (attacker == null || !attacker.isActived || attacker.IsDead || attacker.IsStun) return;
+                var readyDict = heavy ? kukriHeavyReadyAt : kukriLightReadyAt;
+                if (Time.unscaledTime < (readyDict.TryGetValue(sender, out float readyAt) ? readyAt : 0f)) return;
+                Vector3 origin = message.Origin;
+                if ((new Vector3(origin.x, 0f, origin.z) - new Vector3(attacker.Position.x, 0f, attacker.Position.z)).sqrMagnitude > 25f) return; // 5m 伪造门槛（抄原生剑击）
+                readyDict[sender] = Time.unscaledTime + (heavy ? Config.kukriHeavyCooldown : Config.kukriLightInterval);
+                var swing = new BioChemMeleeMessage { Kind = BioChemMeleeMessage.Swing, UnitUID = sender, Heavy = heavy };
+                Broadcast(swing);
+                ApplyMeleeSwingLocal(swing); // 房主本机（Broadcast 不含房主）；身体动画由攻击者 PlayAnimSync 原生同步
+                // 命中判定延迟到挥刀末端（CF 军刀手感）；判定用服务端权威位置 + 出手瞬间方向
+                pendingStrikes.Add(new PendingStrike
+                {
+                    attacker = sender,
+                    direction = message.Direction,
+                    heavy = heavy,
+                    executeAt = Time.unscaledTimeAsDouble + (heavy ? Config.kukriHeavyHitDelay : Config.kukriLightHitDelay)
+                });
+            }
+            catch (Exception e)
+            {
+                Log("学生军刀结算失败：" + e.Message);
+            }
+        }
+
+        // 到点的延迟判定：攻击者挥刀途中被打断（死亡/眩晕）=落空；晕眩目标可补刀（同猎手口径）
+        private static void TickPendingStrikes()
+        {
+            if (pendingStrikes.Count == 0 || !UnitManager.IsSingletonActive()) return;
+            double now = Time.unscaledTimeAsDouble;
+            for (int i = pendingStrikes.Count - 1; i >= 0; i--)
+            {
+                var strike = pendingStrikes[i];
+                if (now < strike.executeAt) continue;
+                pendingStrikes.RemoveAt(i);
+                Unit attacker = UnitManager.Instance.GetUnitByUID(strike.attacker);
+                if (attacker == null || !attacker.isActived || attacker.IsDead || attacker.IsStun) continue;
+                Vector3 forward = strike.direction;
+                forward.y = 0f;
+                if (forward.sqrMagnitude < 0.0001f) { forward = attacker.transform.forward; forward.y = 0f; }
+                forward.Normalize();
+                CollectSweepTargets(attacker, forward, sweepBuffer,
+                    strike.heavy ? Config.kukriHeavyRange : Config.kukriLightRange, KukriSlashAngle);
+                foreach (Unit target in sweepBuffer)
+                    DamageTeacherTeamDown(target.UID, strike.heavy ? Config.kukriHeavyDamage : Config.kukriLightDamage, strike.attacker);
+            }
+        }
+
+        // 学生武器打老师阵营：扣 HP，归零=晕倒（办公室复活，与 AK47 同口径——永久击杀仍是猎刀专属）
+        private static void DamageTeacherTeamDown(ulong targetUid, int amount, ulong attackerUid)
+        {
+            if (downedUntil.ContainsKey(targetUid)) return; // 已倒地的不重复结算
+            if (hunters.Contains(targetUid) || killedTeachers.Contains(targetUid)) return;
+            int newHp = Mathf.Max(0, GetTeacherTeamHp(targetUid) - amount);
+            hp[targetUid] = newHp;
+            Log("[状态] " + GetName(attackerUid) + " 军刀命中 " + GetName(targetUid) + "，HP " + newHp);
+            if (newHp <= 0)
+            {
+                DownUnit(targetUid);
+                return;
+            }
+            var hit = new BioChemMeleeMessage { Kind = BioChemMeleeMessage.Hit, UnitUID = targetUid, Hp = newHp, AttackerUID = attackerUid };
+            Broadcast(hit);
+            ApplyMeleeHitLocal(hit);
+        }
+
+        // 各端挥刀表现：攻击者本地已预测（跳过），其他端摆刀 + 在攻击者位置播挥砍音效
+        private static void ApplyMeleeSwingLocal(BioChemMeleeMessage message)
+        {
+            if (UnitManager.IsSingletonActive() && message.UnitUID == UnitManager.Instance.localPlayerUID) return;
+            StudentKukri.PlaySwing(message.UnitUID, message.Heavy);
+            if (!UnitManager.IsSingletonActive()) return;
+            Unit attacker = UnitManager.Instance.GetUnitByUID(message.UnitUID);
+            if (attacker != null && attacker.isActived)
+                PlayHunterSound(AudioEvents.sfx_DoubaoSwordSwing_sfx, attacker.Position);
+        }
+
+        private static void ApplyMeleeHitLocal(BioChemMeleeMessage message)
+        {
+            hp[message.UnitUID] = message.Hp;
+            if (!UnitManager.IsSingletonActive()) return;
+            Unit unit = UnitManager.Instance.GetUnitByUID(message.UnitUID);
+            if (unit != null && unit.isActived)
+            {
+                SingletonT<FxManager>.Instance.SpawnFx(ConfigManager.TaserSetting.characterHitEffectID, unit.Position + Vector3.up, Vector3.zero, 0uL);
+                // 攻击者本机已在挥刀末端预测时播过命中音（AttackerUID 标记），跳过防双响；其余端正常播
+                bool selfAttacked = message.AttackerUID != 0 && message.AttackerUID == UnitManager.Instance.localPlayerUID;
+                if (!selfAttacked)
+                    PlayHunterSound(AudioEvents.sfx_DoubaoSwordHit_sfx, unit.Position);
+            }
+            if (message.UnitUID == UnitManager.Instance.localPlayerUID)
+                NotifySelf("你被军刀击中了！剩余 HP " + message.Hp);
+        }
+
+        // ===== 投掷物生化手雷（按 4）=====
+        // 左键投掷：本地预测（物理模拟弹道+出手动画）→ C2S → 服务端校验扣数 → 广播 Spawn 给其他端模拟；
+        // 服务端引信到点用自己的物理模拟位置做权威 AOE 结算并广播 Explode（各端销毁本地弹体+爆炸表现）
+
+        private static void TickGrenade()
+        {
+            if (!enabled || StudentWeapons.Selected != StudentWeaponSlot.Throwable || !CanClassAct()) return;
+            if (!Input.GetMouseButtonDown(0)) return;
+            if (!UnitManager.IsSingletonActive()) return;
+            Unit selfUnit = UnitManager.Instance.GetUnitByUID(UnitManager.Instance.localPlayerUID);
+            if (selfUnit == null || !selfUnit.isActived || selfUnit.IsDead || selfUnit.IsStun || !StudentWeapons.CanSelect(selfUnit)) return;
+            if (selfGrenadeCount <= 0) return;
+            if (Time.unscaledTime < localGrenadeReadyAt) return;
+            if (!MonoSingletonT<SceneManager>.IsSingletonActive()) return;
+            Camera cam = MonoSingletonT<SceneManager>.Instance.MainCamera;
+            if (cam == null) return;
+
+            // 出手点/初速与原生投掷同源（DropItemTowards 的冲量参数），抛物线+反弹交给 Rigidbody
+            Vector3 origin = cam.transform.position + cam.transform.forward * 0.45f + cam.transform.right * 0.12f - cam.transform.up * 0.08f;
+            Vector3 velocity = cam.transform.forward * ConfigManager.GameSetting.ThrowForwardImpulse
+                + Vector3.up * ConfigManager.GameSetting.ThrowUpwardImpulse;
+            localGrenadeReadyAt = Time.unscaledTime + GrenadeThrowInterval;
+            selfGrenadeCount--; // 本地乐观扣减，服务端 CountSync 校准
+            grenadeSeq++;
+            BioGrenade.SpawnLocal(selfUnit.UID, grenadeSeq, origin, velocity,
+                hostSim: NetRuntime.IsServer, fuseSeconds: Config.grenadeFuseSeconds); // 房主投掷=本机就是服务端模拟
+            selfUnit.GetComponent<AnimationComponent>()?.PlayAnimSync("Throw");
+            var message = new BioChemGrenadeMessage
+            {
+                Kind = BioChemGrenadeMessage.Throw,
+                UserUID = selfUnit.UID,
+                Seq = grenadeSeq,
+                Origin = origin,
+                Velocity = velocity
+            };
+            if (NetRuntime.IsServer) OnServerGrenadeThrow(null, message);
+            else if (RoomManager.IsSingletonActive()) RoomManager.Instance.SendToServer(message);
+            if (selfGrenadeCount <= 0)
+                SelectWeaponSlot(StudentWeaponSlot.Primary); // CF 习惯：最后一颗扔完自动切回主武器
+        }
+
+        // 服务端出手结算：校验（手雷数/限频/伪造门槛）→ 扣数广播 → 服务端权威物理模拟起引信
+        private static void OnServerGrenadeThrow(NetworkConnectionToClient connection, BioChemGrenadeMessage message)
+        {
+            if (!NetRuntime.IsServer || message.Kind != BioChemGrenadeMessage.Throw) return;
+            try
+            {
+                if (!enabled || !ServerClassActive() || !UnitManager.IsSingletonActive()) return;
+                ulong sender = ResolveSender(connection);
+                if (sender == 0 || infected.Contains(sender) || hunters.Contains(sender)) return;
+                if (Time.unscaledTime < (grenadeThrowReadyAt.TryGetValue(sender, out float readyAt) ? readyAt : 0f)) return;
+                if (GetGrenadeCount(sender) <= 0) return;
+                if (float.IsNaN(message.Origin.x) || float.IsInfinity(message.Origin.x)
+                    || float.IsNaN(message.Velocity.x) || float.IsInfinity(message.Velocity.x)) return;
+                if (message.Velocity.sqrMagnitude < 0.01f || message.Velocity.sqrMagnitude > 900f) return; // 抛速门槛
+                Unit thrower = UnitManager.Instance.GetUnitByUID(sender);
+                if (thrower == null || !thrower.isActived || thrower.IsDead || thrower.IsStun) return;
+                if ((new Vector3(message.Origin.x, 0f, message.Origin.z) - new Vector3(thrower.Position.x, 0f, thrower.Position.z)).sqrMagnitude > 25f) return; // 5m 伪造门槛
+                grenadeThrowReadyAt[sender] = Time.unscaledTime + GrenadeThrowInterval;
+                grenadeCount[sender] = GetGrenadeCount(sender) - 1;
+                BroadcastGrenadeCount(sender);
+                if (sender != UnitManager.Instance.localPlayerUID) // 房主自己投的已在 TickGrenade 里起了 hostSim 模拟
+                    BioGrenade.SpawnLocal(sender, message.Seq, message.Origin, message.Velocity, hostSim: true, fuseSeconds: Config.grenadeFuseSeconds);
+                var spawn = new BioChemGrenadeMessage
+                {
+                    Kind = BioChemGrenadeMessage.Spawn,
+                    UserUID = sender,
+                    Seq = message.Seq,
+                    Origin = message.Origin,
+                    Velocity = message.Velocity
+                };
+                Broadcast(spawn); // 其他端本地模拟（投掷者本机已预测）
+            }
+            catch (Exception e)
+            {
+                Log("手雷出手结算失败：" + e.Message);
+            }
+        }
+
+        // 引信到点（服务端权威模拟位置）：AOE 结算 + 广播爆炸点。
+        // 只伤老师阵营（大老师+小老师，CF 生化手雷不打人类——学生/猎手/投掷者本人无伤），伤害随距离线性衰减
+        private static void OnGrenadeFuseDue(ulong owner, uint seq, Vector3 position)
+        {
+            try
+            {
+                if (!enabled || !ServerClassActive() || !UnitManager.IsSingletonActive()) return;
+                float radius = Config.grenadeRadius;
+                int maxDamage = Config.grenadeDamage;
+                var victims = new List<ulong>();
+                var damages = new List<int>();
+                foreach (Unit unit in UnitManager.Instance.playerList)
+                {
+                    if (!IsLivingTeacherOpponent(unit)) continue;
+                    if (downedUntil.ContainsKey(unit.UID)) continue; // 已倒地的不重复结算
+                    float dist = Vector3.Distance(unit.Position + Vector3.up * 0.5f, position);
+                    if (dist > radius) continue;
+                    victims.Add(unit.UID);
+                    damages.Add(Mathf.Max(1, Mathf.RoundToInt(Mathf.Lerp(maxDamage, maxDamage * GrenadeEdgeDamageFraction, Mathf.Clamp01(dist / radius)))));
+                }
+                for (int i = 0; i < victims.Count; i++)
+                {
+                    ulong victim = victims[i];
+                    int damage = damages[i];
+                    int newHp = Mathf.Max(0, GetTeacherTeamHp(victim) - damage);
+                    hp[victim] = newHp;
+                    Log("[状态] 生化手雷炸到 " + GetName(victim) + "（伤害 " + damage + "），HP " + newHp);
+                    if (newHp <= 0) DownUnit(victim); // 归零晕倒复活（学生武器口径，同 AK47）
+                    else
+                    {
+                        // 复用 Dart/Hit 逐目标同步 HP；SlowStacks 带当前权威层数（手雷不加减速，防误清已有减速）
+                        byte stacks = (byte)PruneServerSlow(victim).Count;
+                        var hit = new BioChemDartMessage { TargetUID = victim, TargetHp = newHp, SlowStacks = stacks };
+                        Broadcast(hit);
+                        ApplyDartHit(hit);
+                    }
+                }
+                var explode = new BioChemGrenadeMessage { Kind = BioChemGrenadeMessage.Explode, UserUID = owner, Seq = seq, Position = position };
+                Broadcast(explode);
+                BioGrenade.ExplodeLocal(owner, seq, position); // 房主本机表现（Broadcast 不含房主）
+                Log("[状态] " + GetName(owner) + " 的生化手雷爆炸" + (victims.Count > 0 ? "，炸到 " + victims.Count + " 个目标" : "（范围内无目标）"));
+            }
+            catch (Exception e)
+            {
+                Log("手雷爆炸结算失败：" + e.Message);
+            }
         }
 
         // 游戏源码拼写如此（Studeng）
@@ -1602,6 +2131,23 @@ namespace BioChem
             foodRefillReadyAt.Clear();
             selfDartAmmo = Config.dartMaxAmmo; // 新一局备弹回满（与服务端懒初始化口径一致）
             Ak47Weapon.ResetForNewRound(); // AK 全收：世界枪/viewmodel/弹匣/换弹状态归零
+            pistolAmmo.Clear();
+            selfPistolAmmo = Config.pistolMaxAmmo;
+            PistolWeapon.ResetForNewRound(); // 手枪全收（世界枪必须显式销毁，玩家单位跨局存活）
+            pendingStrikes.Clear();
+            kukriLightReadyAt.Clear();
+            kukriHeavyReadyAt.Clear();
+            localKukriLightReadyAt = 0f;
+            localKukriHeavyReadyAt = 0f;
+            localKukriHeavyHeld = false;
+            localFeedbacks.Clear();
+            StudentKukri.RemoveAll(); // 军刀随回合重置全收
+            grenadeCount.Clear();
+            selfGrenadeCount = GrenadeMaxCount; // 新一局手雷回满（每人 1 颗）
+            grenadeSeq = 0;
+            localGrenadeReadyAt = 0f;
+            grenadeThrowReadyAt.Clear();
+            BioGrenade.ResetForNewRound(); // 飞行中的手雷全收
             selfStamina = -1f;
             localStunReadyAt = 0f;
             mgNextFireAt = 0f;
@@ -1649,6 +2195,14 @@ namespace BioChem
             killedTeachers.Remove(playerUID);
             hunterStrikeReadyAt.Remove(playerUID);
             HunterKnife.Remove(playerUID);
+            pistolAmmo.Remove(playerUID);
+            grenadeCount.Remove(playerUID);
+            grenadeThrowReadyAt.Remove(playerUID);
+            kukriLightReadyAt.Remove(playerUID);
+            kukriHeavyReadyAt.Remove(playerUID);
+            pendingStrikes.RemoveAll(s => s.attacker == playerUID);
+            BioGrenade.RemoveOwner(playerUID); // 其飞行中的手雷一并销毁
+            StudentKukri.Remove(playerUID);
             MiniTeacherCatch.RemoveCatchAbility(playerUID); // 断线清理：注销组件上的 msg 2017 监听
             if (hunterOrigScale.Remove(playerUID) && UnitManager.IsSingletonActive())
             {
@@ -1677,6 +2231,21 @@ namespace BioChem
             {
                 dto.evolutionUids.Add((long)pair.Key);
                 dto.evolutionStages.Add(pair.Value);
+            }
+            foreach (var pair in StudentWeapons.ServerSelections)
+            {
+                dto.slotUids.Add((long)pair.Key);
+                dto.slotVals.Add((int)pair.Value);
+            }
+            foreach (var pair in pistolAmmo)
+            {
+                dto.pistolUids.Add((long)pair.Key);
+                dto.pistolVals.Add(pair.Value);
+            }
+            foreach (var pair in grenadeCount)
+            {
+                dto.grenadeUids.Add((long)pair.Key);
+                dto.grenadeVals.Add(pair.Value);
             }
             // Notify 只随本次广播：客户端用它弹公告（服务端已 NotifyAll 过，自己不会再收到）。
             // cfg 随每份快照带上：房主数值改动即时同步，定时重广播兜底
@@ -1740,7 +2309,20 @@ namespace BioChem
             stamina.Clear();
             for (int i = 0; i < dto.stUids.Count && i < dto.stVals.Count; i++)
                 if (dto.stUids[i] != 0) stamina[(ulong)dto.stUids[i]] = dto.stVals[i];
+            // 武器栏快照：全员槽位视图重建 + 手枪备弹/手雷数对齐（中途加入自愈）
+            StudentWeapons.ApplySnapshot(dto.slotUids, dto.slotVals);
+            pistolAmmo.Clear();
+            for (int i = 0; i < dto.pistolUids.Count && i < dto.pistolVals.Count; i++)
+                if (dto.pistolUids[i] != 0) pistolAmmo[(ulong)dto.pistolUids[i]] = Mathf.Max(0, dto.pistolVals[i]);
+            grenadeCount.Clear();
+            for (int i = 0; i < dto.grenadeUids.Count && i < dto.grenadeVals.Count; i++)
+                if (dto.grenadeUids[i] != 0) grenadeCount[(ulong)dto.grenadeUids[i]] = Mathf.Clamp(dto.grenadeVals[i], 0, GrenadeMaxCount);
             ulong selfUid = UnitManager.IsSingletonActive() ? UnitManager.Instance.localPlayerUID : 0;
+            if (selfUid != 0)
+            {
+                if (pistolAmmo.TryGetValue(selfUid, out int pistolAmmoValue)) selfPistolAmmo = pistolAmmoValue;
+                if (grenadeCount.TryGetValue(selfUid, out int grenadeValue)) selfGrenadeCount = grenadeValue;
+            }
             if (selfUid != 0 && (!enabled || infected.Contains(selfUid) || hunters.Contains(selfUid)))
                 StudentWeapons.RemovePlayer(selfUid);
             int previousStage = GetEvolutionStage(selfUid);
@@ -1781,17 +2363,25 @@ namespace BioChem
             TickSelfStamina(dt);
             HandleKeys();
             Ak47Weapon.Tick();
+            PistolWeapon.Tick();
+            StudentKukri.Tick(); // 持刀显隐+挥刀驱动+自愈（无持刀者时零开销早退）
             HunterKnife.Tick(); // 挥刀驱动+自愈（无猎手时零开销早退）
+            BioGrenade.Tick();  // 飞行手雷清理+手持模型驱动
             if (enabled)
             {
                 TickHunterMelee();
+                TickStudentMelee();   // 军刀轻击/重击输入（本地预测反馈延迟调度）
+                TickKukriFeedback();  // 军刀挥刀末端的本地预测反馈
                 MiniTeacherCatch.TickSelfHeal(); // 感染名单里的抓取组件自愈（1s 节流）
-                TickMachineGun();
+                TickGunFire();        // 主/副武器连发循环（AK47/手枪）
+                TickGrenade();        // 手雷投掷输入
                 TickKilledTeachers();
                 if (NetRuntime.IsServer) TickHunterUnlockAnnounce();
             }
             if (NetRuntime.IsServer)
             {
+                TickPendingStrikes();               // 军刀挥刀末端的延迟判定
+                BioGrenade.TickServerFuse(OnGrenadeFuseDue); // 手雷引信到点权威结算
                 TickPillarInfection();
                 TickDowned();
                 TickDartEquip();
@@ -1889,7 +2479,11 @@ namespace BioChem
                 && StudentWeapons.CanSelect(UnitManager.Instance.localPlayer))
                 SelectWeaponSlot(slot);
             if (kb.GetKeyDown(StunKey)) TryMiniStun();
-            if (kb.GetKeyDown(KeyCode.R) && StudentWeapons.Selected == StudentWeaponSlot.Primary) Ak47Weapon.TryReload();
+            if (kb.GetKeyDown(KeyCode.R))
+            {
+                if (StudentWeapons.Selected == StudentWeaponSlot.Primary) Ak47Weapon.TryReload();
+                else if (StudentWeapons.Selected == StudentWeaponSlot.Secondary) PistolWeapon.TryReload();
+            }
             // G 变身老师猎手：剩余学生 ≤ hunterTriggerStudents 时解锁（服务端会复验）
             if (kb.GetKeyDown(HunterKey) && CanTransformHunter()) SendTransformRequest();
         }
@@ -1996,17 +2590,27 @@ namespace BioChem
             Unit student = UnitManager.Instance.GetUnitByUID(uid);
             if (!StudentWeapons.CanSelect(student)) return;
 
-            message.ItemUID = StudentWeapons.SelectOnServer(student, (StudentWeaponSlot)message.Slot);
-            if (connection == null || connection == NetworkServer.localConnection) StudentWeapons.ApplyIssuedItem(message);
-            else connection.Send(message);
+            // 结算后向全员广播（含请求者）：各端记录槽位（远端 AK/手枪/军刀/手雷世界模型显隐依据），本人记录发放的物品 UID
+            var issued = new BioChemWeaponSlotMessage
+            {
+                UserUID = uid,
+                Slot = message.Slot,
+                ItemUID = StudentWeapons.SelectOnServer(student, (StudentWeaponSlot)message.Slot)
+            };
+            StudentWeapons.ApplyIssuedItem(issued); // 房主本机（Broadcast 不含房主）
+            Broadcast(issued);
         }
 
-        // 已发放的 AK 用连发管线。切槽后等待同步回收期间，也拦住新发起的瞄准。
+        // 已发放的枪（AK/手枪共用嘴叼承载物）用连发管线，吞掉原生单击开火。
+        // 切槽后等待同步回收期间旧枪还挂在嘴上（Selected 已切走），IsLocalGunItem 仍匹配——继续拦，
+        // 否则原生单发会把吹箭物品消耗掉；瞄准（UseItem2）只在主/副武器槽放行
         public static bool BeforeTaserHandleInput(TaserComponent __instance, eCmdType command, eClickType click, Unit ___user)
         {
-            if (___user == null || !___user.isLocalPlayer || !StudentWeapons.IsLocalAk(__instance.owner)) return true;
+            if (___user == null || !___user.isLocalPlayer || !StudentWeapons.IsLocalGunItem(__instance.owner)) return true;
             if (command == eCmdType.UseItem) return false;
-            return command != eCmdType.UseItem2 || click == eClickType.Release || StudentWeapons.Selected == StudentWeaponSlot.Primary;
+            bool aimingSlot = StudentWeapons.Selected == StudentWeaponSlot.Primary
+                || StudentWeapons.Selected == StudentWeaponSlot.Secondary;
+            return command != eCmdType.UseItem2 || click == eClickType.Release || aimingSlot;
         }
 
         // F7 有 Rewired 与 IMGUI 两条通道，同一帧可能都触发，节流防双开关。
@@ -2053,6 +2657,8 @@ namespace BioChem
             NetworkClient.RegisterHandler<BioChemStunMessage>(OnClientStun, true);
             NetworkClient.RegisterHandler<BioChemDownMessage>(OnClientDown, true);
             NetworkClient.RegisterHandler<BioChemHunterMessage>(OnClientHunter, true);
+            NetworkClient.RegisterHandler<BioChemMeleeMessage>(OnClientMelee, true);
+            NetworkClient.RegisterHandler<BioChemGrenadeMessage>(OnClientGrenade, true);
             // 重进房间 = 全新连接：清掉上一局残留（enabled/infected 等待 ≤5s 快照重建）。
             // 房主也会走 InitClient，但 NetworkServer.active 已为 true，不会误清服务端权威状态
             if (!NetworkServer.active)
@@ -2070,6 +2676,8 @@ namespace BioChem
             NetworkServer.RegisterHandler<BioChemStunMessage>(OnServerStun, true);
             NetworkServer.RegisterHandler<BioChemWriteMessage>(OnServerWrite, true);
             NetworkServer.RegisterHandler<BioChemHunterMessage>(OnServerHunter, true);
+            NetworkServer.RegisterHandler<BioChemMeleeMessage>(OnServerMelee, true);
+            NetworkServer.RegisterHandler<BioChemGrenadeMessage>(OnServerGrenadeThrow, true);
             // 新建房间：清掉上一局服务端瞬态（enabled 是房主设置，跨房保留）
             ClearRoundState();
             StudentWeapons.ResetLocalItem();
@@ -2080,9 +2688,10 @@ namespace BioChem
             if (NetworkServer.active) return;
             if (message.Kind == BioChemDartMessage.Hit) ApplyDartHit(message);
             else if (message.Kind == BioChemDartMessage.AmmoSync) ApplyAmmoSyncLocal(message);
+            else if (message.Kind == BioChemDartMessage.PistolAmmoSync) ApplyPistolAmmoSyncLocal(message);
             else if (message.Kind == BioChemDartMessage.MgShot)
             {
-                // 射手自己跳过（本地已预测渲染）；其他端渲染弹体（原生拖尾/音效由 PlayFire 播放）
+                // 射手自己跳过（本地已预测渲染）；其他端渲染弹体（原生拖尾/音效由 PlayFire 播放，按弹体 UID 分枪声）
                 if (UnitManager.IsSingletonActive() && message.UserUID == UnitManager.Instance.localPlayerUID) return;
                 PlayFireShot(BuildShot(message));
             }
@@ -2115,6 +2724,27 @@ namespace BioChem
             else if (message.Kind == BioChemHunterMessage.Hit) ApplyHunterHitLocal(message);
             else if (message.Kind == BioChemHunterMessage.RevertVisual) ApplyRevertVisualLocal(message);
             else if (message.Kind == BioChemHunterMessage.Swing) ApplyHunterSwingLocal(message);
+        }
+
+        private static void OnClientMelee(BioChemMeleeMessage message)
+        {
+            if (NetworkServer.active) return;
+            if (message.Kind == BioChemMeleeMessage.Swing) ApplyMeleeSwingLocal(message);
+            else if (message.Kind == BioChemMeleeMessage.Hit) ApplyMeleeHitLocal(message);
+        }
+
+        private static void OnClientGrenade(BioChemGrenadeMessage message)
+        {
+            if (NetworkServer.active) return;
+            if (message.Kind == BioChemGrenadeMessage.Spawn)
+            {
+                // 投掷者本机跳过（本地已预测模拟）；其他端起本地物理模拟（纯表现，爆炸位置听服务端 Explode）
+                if (UnitManager.IsSingletonActive() && message.UserUID == UnitManager.Instance.localPlayerUID) return;
+                BioGrenade.SpawnLocal(message.UserUID, message.Seq, message.Origin, message.Velocity,
+                    hostSim: false, fuseSeconds: Config.grenadeFuseSeconds);
+            }
+            else if (message.Kind == BioChemGrenadeMessage.Explode) BioGrenade.ExplodeLocal(message.UserUID, message.Seq, message.Position);
+            else if (message.Kind == BioChemGrenadeMessage.CountSync) ApplyGrenadeCountLocal(message);
         }
 
         // ===== 工具 =====

@@ -103,7 +103,7 @@ namespace BioChem
 
             root = NewRect(viewport, "生化HUD");
             root.anchorMin = root.anchorMax = Vector2.zero;
-            root.pivot = new Vector2(1f, 0f);
+            root.pivot = new Vector2(0f, 0f); // 左下角放置：锚点即卡片左下角
             root.sizeDelta = new Vector2(Width, 0f);
 
             Stretch(ImageAt(root, "描边", new Color32(148, 116, 72, 224)).rectTransform, 0f);
@@ -171,9 +171,7 @@ namespace BioChem
         {
             Place(loadout, Inset, y, Width - Inset * 2f, 114f);
             SetText(weapon, StudentWeapons.SelectedWeapon ?? (StudentWeapons.Selected == StudentWeaponSlot.None ? "武器" : "空栏位"));
-            SetText(ammo, Ak47Weapon.Equipped
-                ? $"{Ak47Weapon.Mag}/{Ak47Weapon.MagSize} · 备弹 {ModEntry.SelfDartAmmo}/{ModEntry.Config.dartMaxAmmo}"
-                : "");
+            SetText(ammo, AmmoText());
             for (int i = 0; i < slotFrames.Length; i++)
             {
                 bool selected = (int)StudentWeapons.Selected == i + 1;
@@ -182,6 +180,25 @@ namespace BioChem
                 slotFrames[i].color = sprite != null ? Color.white : new Color32(70, 54, 35, selected ? (byte)255 : (byte)160);
             }
             y += 120f;
+        }
+
+        // 弹药行按当前槽位分支（四把武器各自的口径）
+        private static string AmmoText()
+        {
+            var config = ModEntry.Config;
+            switch (StudentWeapons.Selected)
+            {
+                case StudentWeaponSlot.Primary when Ak47Weapon.Equipped:
+                    return $"{Ak47Weapon.Mag}/{Ak47Weapon.MagSize} · 备弹 {ModEntry.SelfDartAmmo}/{config.dartMaxAmmo}";
+                case StudentWeaponSlot.Secondary when PistolWeapon.Equipped:
+                    return $"{PistolWeapon.Mag}/{PistolWeapon.MagSize} · 备弹 {ModEntry.SelfPistolAmmo}/{config.pistolMaxAmmo}";
+                case StudentWeaponSlot.Melee:
+                    return $"轻击 {config.kukriLightDamage} · 重击 {config.kukriHeavyDamage}";
+                case StudentWeaponSlot.Throwable:
+                    return $"手雷 ×{ModEntry.SelfGrenadeCount}/{ModEntry.GrenadeMaxCount}";
+                default:
+                    return "";
+            }
         }
 
         private static string Status(Unit self, bool hunter, bool mini, bool teacher, bool classing)
@@ -199,14 +216,34 @@ namespace BioChem
                 ? $"被减速 ×{ModEntry.SelfSlowStacks}   ·   移速 -{ModEntry.SelfSlowStacks * config.dartSlowPerStack:P0}" : "";
 
             string action;
-            if (Ak47Weapon.Equipped)
+            if (StudentWeapons.Selected == StudentWeaponSlot.Secondary)
+            {
+                action = PistolWeapon.Equipped
+                    ? ModEntry.SelfPistolAmmo <= 0 ? "备弹耗尽 · 进食补充"
+                        : PistolWeapon.Reloading ? $"换弹中 · {PistolWeapon.ReloadRemain:0.0} 秒"
+                        : "左键连发   右键瞄准   R 换弹"
+                    : StudentWeapons.IsLocalGunItem(self.GetComponent<MouthItemUseComponent>()?.currentMouthItem)
+                        ? "嘴部被占用 · 腾空后按 2 装备"
+                        : "手枪未就绪 · 按 2 重试";
+            }
+            else if (StudentWeapons.Selected == StudentWeaponSlot.Melee)
+            {
+                action = $"左键轻击 {config.kukriLightDamage} 伤害（可长按连击）   右键重击 {config.kukriHeavyDamage} 伤害\n命中判定在挥刀动作末端（CF 军刀手感）";
+            }
+            else if (StudentWeapons.Selected == StudentWeaponSlot.Throwable)
+            {
+                action = ModEntry.SelfGrenadeCount > 0
+                    ? $"左键扔出手雷 · 引信 {config.grenadeFuseSeconds:0.#} 秒，半径 {config.grenadeRadius:0.#} 米"
+                    : "没有手雷 · 吃东西随机补回";
+            }
+            else if (Ak47Weapon.Equipped)
                 action = ModEntry.SelfDartAmmo <= 0 ? "备弹耗尽 · 进食补充"
                     : Ak47Weapon.Reloading ? $"换弹中 · {Ak47Weapon.ReloadRemain:0.0} 秒"
                     : "左键连发   右键瞄准   R 换弹";
             else if (StudentWeapons.Selected == StudentWeaponSlot.Primary)
             {
                 Unit mouthItem = self.GetComponent<MouthItemUseComponent>()?.currentMouthItem;
-                action = mouthItem != null && !StudentWeapons.IsLocalAk(mouthItem)
+                action = mouthItem != null && StudentWeapons.IsLocalGunItem(mouthItem)
                     ? "嘴部被占用 · 腾空后按 1 装备"
                     : "AK47 未就绪 · 按 1 重试";
             }
@@ -216,6 +253,18 @@ namespace BioChem
 
         private static string DamageText()
         {
+            var config = ModEntry.Config;
+            switch (StudentWeapons.Selected)
+            {
+                case StudentWeaponSlot.Secondary:
+                    return $"手枪伤害 {config.pistolDamage}   ·   弹匣 {config.pistolMagSize}   ·   无感染加成";
+                case StudentWeaponSlot.Melee:
+                    return $"军刀 轻击 {config.kukriLightDamage} / 重击 {config.kukriHeavyDamage} 伤害";
+                case StudentWeaponSlot.Throwable:
+                    return $"手雷 {config.grenadeDamage} 伤害 · 半径 {config.grenadeRadius:0.#}m";
+                default:
+                    break;
+            }
             float bonus = ModEntry.DartDamageBonus();
             return bonus > 0f
                 ? $"AK47 伤害 {ModEntry.EffectiveDartDamage()}   ·   基础 {ModEntry.Config.dartDamage}   ·   感染 +{bonus:P0}"
@@ -264,11 +313,9 @@ namespace BioChem
                     Mathf.Min(frame.xMax, max.x), Mathf.Min(frame.yMax, max.y));
             }
 
-            float guideLeft = view.mGuideKeyItemPanel != null && view.mGuideKeyItemPanel.transform is RectTransform guide
-                ? BoundsOf(guide).xMin : available.xMax;
             Rect? skills = view.skillContainer is RectTransform skillRect && skillRect.gameObject.activeInHierarchy
                 ? BoundsOf(skillRect) : (Rect?)null;
-            float scale = Fit(available, guideLeft, skills, canvas.scaleFactor, root.rect.height, out var corner);
+            float scale = Fit(available, skills, canvas.scaleFactor, root.rect.height, out var corner);
             if (scale <= 0f)
             {
                 Hide();
@@ -279,17 +326,18 @@ namespace BioChem
             root.gameObject.SetActive(true);
         }
 
-        private static float Fit(Rect available, float guideLeft, Rect? skills, float canvasScale, float cardHeight,
+        // 左下角放置：贴左缘底缘，武器技能栏（skillContainer）占左下时整卡抬到其上方
+        private static float Fit(Rect available, Rect? skills, float canvasScale, float cardHeight,
             out Vector2 corner)
         {
-            float right = Mathf.Min(available.xMax, guideLeft) - Margin;
+            float left = available.xMin + Margin;
             float bottom = available.yMin + Margin;
             float scale = Mathf.Clamp(0.72f / Mathf.Max(0.01f, canvasScale), 1f, 1.4f);
-            scale = Mathf.Min(scale, (right - available.xMin - Margin) / Width);
-            if (skills is Rect occupied && occupied.xMin < right && occupied.xMax > right - Width * scale)
+            scale = Mathf.Min(scale, (available.xMax - left - Margin) / Width);
+            if (skills is Rect occupied && occupied.xMax > left && occupied.xMin < left + Width * scale)
                 bottom = Mathf.Max(bottom, occupied.yMax + Margin);
             float maxHeight = Mathf.Min(available.height * 0.39f, available.yMax - bottom - Margin);
-            corner = new Vector2(right, bottom);
+            corner = new Vector2(left, bottom);
             return Mathf.Min(scale, maxHeight / cardHeight);
         }
 
