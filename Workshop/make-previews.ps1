@@ -167,3 +167,40 @@ New-Item -ItemType Directory -Force -Path (Join-Path $root 'BioChem') | Out-Null
 New-Preview -OutPath (Join-Path $root 'BioChem\preview.png') `
     -Title '生化模式' -Subtitle '挂柱感染 · 小老师体力机制 · 连发吹箭' `
     -Tag 'Worst Class Ever Mod' -ColorTop '#2F6D4F' -ColorBottom '#0C1F16' -Decorate $bioDeco
+
+# ---- TeacherReward：琥珀金渐变 + 三颗金星（三个奖励点）+ H 键帽 ----
+$rewardDeco = {
+    param($g, $w, $h)
+    $goldBrush = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(190, 255, 216, 92))
+    $goldPen = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(220, 255, 228, 140)), 3
+    # 三颗五角星（三个奖励点），顶点绕圆展开
+    foreach ($s in @(@(400, 140, 48), @(206, 246, 30), @(594, 246, 30))) {
+        $cx = $s[0]; $cy = $s[1]; $r1 = $s[2]; $r2 = $r1 * 0.42
+        $list = New-Object 'System.Collections.Generic.List[System.Drawing.PointF]'
+        for ($i = 0; $i -lt 10; $i++) {
+            $a = -90 + $i * 36
+            $r = $(if ($i % 2 -eq 0) { $r1 } else { $r2 })
+            $rad = $a * [Math]::PI / 180
+            $list.Add([System.Drawing.PointF]::new(
+                [float]($cx + [Math]::Cos($rad) * $r), [float]($cy + [Math]::Sin($rad) * $r)))
+        }
+        $pts = [System.Drawing.PointF[]]$list.ToArray()
+        $g.FillPolygon($goldBrush, $pts)
+        $g.DrawPolygon($goldPen, $pts)
+    }
+    # H 键帽（奖励面板热键）
+    $cap = New-RoundedRect ($w / 2 - 46) ($h - 168) 92 92 18
+    $capBrush = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(90, 0, 0, 0))
+    $capPen = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(200, 255, 255, 255)), 3
+    $g.FillPath($capBrush, $cap)
+    $g.DrawPath($capPen, $cap)
+    $capFont = New-Object System.Drawing.Font 'Microsoft YaHei', 38, ([System.Drawing.FontStyle]::Bold)
+    $capSize = $g.MeasureString('H', $capFont)
+    $g.DrawString('H', $capFont, [System.Drawing.Brushes]::White, `
+        $w / 2 - $capSize.Width / 2, $h - 168 + 44 - $capSize.Height / 2)
+}
+
+New-Item -ItemType Directory -Force -Path (Join-Path $root 'TeacherReward') | Out-Null
+New-Preview -OutPath (Join-Path $root 'TeacherReward\preview.png') `
+    -Title '老师奖励' -Subtitle '三个奖励点 · 按 H 选技能卡 · 增益与护盾' `
+    -Tag 'Worst Class Ever Mod' -ColorTop '#B07A1E' -ColorBottom '#3D2608' -Decorate $rewardDeco

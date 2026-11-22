@@ -9,6 +9,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TrickMole", "TrickMole\Tric
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "BioChem", "BioChem\BioChem.csproj", "{6923254C-E62B-44F1-8D95-FE7D7810BC64}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TeacherReward", "TeacherReward\TeacherReward.csproj", "{267A2DEE-2853-49C5-B626-5184909E7326}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -30,5 +32,9 @@ Global
 		{6923254C-E62B-44F1-8D95-FE7D7810BC64}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{6923254C-E62B-44F1-8D95-FE7D7810BC64}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{6923254C-E62B-44F1-8D95-FE7D7810BC64}.Release|Any CPU.Build.0 = Release|Any CPU
+		{267A2DEE-2853-49C5-B626-5184909E7326}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{267A2DEE-2853-49C5-B626-5184909E7326}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{267A2DEE-2853-49C5-B626-5184909E7326}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{267A2DEE-2853-49C5-B626-5184909E7326}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal
