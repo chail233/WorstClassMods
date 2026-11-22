@@ -16,6 +16,10 @@ namespace BioChem
         private const float SwingDuration = 0.3f;      // 一次挥刀的表现时长（与 hunterAttackInterval 0.4s 节奏匹配）
         private const float SwingWindupDeg = -55f;     // 前段举刀角度
         private const float SwingSlashDeg = 95f;       // 劈下终点角度
+        private const float SwingPivotDistance = 0.30f; // 挥刀支点离刀根的距离（沿刀背方向）：刀绕它扫出大幅弧线
+        private static readonly Vector3 SwingAxis = new Vector3(1f, -0.7f, 0f).normalized; // 斜劈轴：右上举刀→向左下劈出
+        private static readonly Color TrailColor = new Color(1f, 0.42f, 0.18f); // 挥刀轨迹：终结者橙红
+        private const float TrailWidth = 0.05f;
         // 刀体在手部/相机空间的基础位姿（实测可调；世界刀优先对齐 ItemHandPos 参考位）
         private static readonly Vector3 HandLocalPos = new Vector3(0.02f, 0.05f, 0.01f);
         private static readonly Vector3 HandLocalEuler = new Vector3(0f, 0f, 0f);
@@ -26,9 +30,13 @@ namespace BioChem
         private sealed class Rig
         {
             public Transform worldKnife;   // 手骨下的刀根（其他玩家可见）
+            public Vector3 worldRestPos;   // 静止位姿（挥刀绕支点公转的基准，结束恢复）
             public Quaternion worldRestRot;
             public Transform viewKnife;    // 相机下的刀根（仅本地猎手）
+            public Vector3 viewRestPos;
             public Quaternion viewRestRot;
+            public TrailRenderer worldTrail; // 刀尖拖尾（挥刀轨迹，随刀销毁）
+            public TrailRenderer viewTrail;
             public float swingStartAt = -999f;
             public bool swinging;
             public float nextBuildTryAt;   // 构建失败后的重试节流（等模型部件就绪）
@@ -48,7 +56,7 @@ namespace BioChem
             if (unit == null || !unit.isActived || unit.model == null) return;
             if (rigs.TryGetValue(unit.UID, out Rig rig) && rig.worldKnife != null)
             {
-                if (unit.isLocalPlayer && rig.viewKnife == null) rig.viewKnife = CaptureViewKnife(rig); // 相机可能晚建
+                if (unit.isLocalPlayer && rig.viewKnife == null) CaptureViewKnife(rig); // 相机可能晚建
                 return;
             }
             Remove(unit.UID); // 清掉半残 rig（比如只剩 viewKnife）
@@ -56,11 +64,13 @@ namespace BioChem
             rig.worldKnife = BuildHandKnife(unit);
             if (rig.worldKnife != null)
             {
+                rig.worldRestPos = rig.worldKnife.localPosition;
                 rig.worldRestRot = rig.worldKnife.localRotation;
+                rig.worldTrail = rig.worldKnife.GetComponentInChildren<TrailRenderer>();
                 ModEntry.Log?.Invoke("[状态] " + ModEntry.GetName(unit.UID) + " 已持猎刀");
             }
             if (unit.isLocalPlayer)
-                rig.viewKnife = CaptureViewKnife(rig);
+                CaptureViewKnife(rig);
             rigs[unit.UID] = rig;
         }
 
@@ -83,6 +93,8 @@ namespace BioChem
             if (!rigs.TryGetValue(uid, out Rig rig)) return;
             rig.swingStartAt = Time.unscaledTime;
             rig.swinging = true;
+            WeaponModels.EmitSlashTrail(rig.worldTrail, SwingDuration);
+            WeaponModels.EmitSlashTrail(rig.viewTrail, SwingDuration);
             ApplySwingPose(rig, 0f);
         }
 
@@ -128,16 +140,26 @@ namespace BioChem
         {
             float angle = SwingAngle(t);
             if (rig.worldKnife != null)
-                rig.worldKnife.localRotation = rig.worldRestRot * Quaternion.Euler(angle, 0f, 0f);
+                WeaponModels.ApplySwingPose(rig.worldKnife, rig.worldRestPos, rig.worldRestRot, angle, 0f, SwingPivotDistance, SwingAxis);
             if (rig.viewKnife != null)
-                rig.viewKnife.localRotation = rig.viewRestRot * Quaternion.Euler(angle * 0.8f, 0f, 0f);
+                WeaponModels.ApplySwingPose(rig.viewKnife, rig.viewRestPos, rig.viewRestRot, angle * 0.8f, 0f, SwingPivotDistance, SwingAxis);
         }
 
         private static void ResetPose(Rig rig)
         {
             rig.swinging = false;
-            if (rig.worldKnife != null) rig.worldKnife.localRotation = rig.worldRestRot;
-            if (rig.viewKnife != null) rig.viewKnife.localRotation = rig.viewRestRot;
+            WeaponModels.StopSlashTrail(rig.worldTrail); // 弧线按 time 自然淡出
+            WeaponModels.StopSlashTrail(rig.viewTrail);
+            if (rig.worldKnife != null)
+            {
+                rig.worldKnife.localPosition = rig.worldRestPos;
+                rig.worldKnife.localRotation = rig.worldRestRot;
+            }
+            if (rig.viewKnife != null)
+            {
+                rig.viewKnife.localPosition = rig.viewRestPos;
+                rig.viewKnife.localRotation = rig.viewRestRot;
+            }
         }
 
         // 举起→劈下→回位三段角度曲线
@@ -189,14 +211,17 @@ namespace BioChem
             return root.transform;
         }
 
-        private static Transform CaptureViewKnife(Rig rig)
+        private static void CaptureViewKnife(Rig rig)
         {
             Transform knife = BuildViewModel();
-            if (knife != null) rig.viewRestRot = knife.localRotation;
-            return knife;
+            if (knife == null) return;
+            rig.viewKnife = knife;
+            rig.viewRestPos = knife.localPosition;
+            rig.viewRestRot = knife.localRotation;
+            rig.viewTrail = knife.GetComponentInChildren<TrailRenderer>();
         }
 
-        // 菜刀造型：宽刃+刀镡+短柄，root 即握点；modelEuler 控制刀刃朝向（调位姿只动这层）
+        // 菜刀造型：root 即握点，拖尾挂刀尖 y≈0.29
         private static void BuildParts(Transform root, Quaternion modelEuler)
         {
             EnsureMaterials();
@@ -206,6 +231,7 @@ namespace BioChem
             CreatePart(model.transform, "blade", new Vector3(0f, 0.17f, 0f), new Vector3(0.06f, 0.24f, 0.006f), bladeMaterial);
             CreatePart(model.transform, "guard", new Vector3(0f, 0.04f, 0f), new Vector3(0.075f, 0.025f, 0.022f), guardMaterial);
             CreatePart(model.transform, "handle", new Vector3(0f, -0.05f, 0f), new Vector3(0.03f, 0.12f, 0.03f), handleMaterial);
+            WeaponModels.AttachSlashTrail(model.transform, new Vector3(0f, 0.29f, 0f), TrailColor, TrailWidth);
         }
 
         private static void CreatePart(Transform parent, string name, Vector3 localPos, Vector3 size, Material material)

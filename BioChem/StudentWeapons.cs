@@ -15,10 +15,10 @@ namespace BioChem
         Throwable
     }
 
-    // C2S 只请求栏位（UserUID 忽略）。服务端结算后向全员广播：UserUID=玩家、Slot=新槽位、ItemUID=发放的物品 UID
-    // （主/副武器共用嘴叼 Taser 承载物，近战/投掷物无实体物品 ItemUID=0）。
-    // 各端记录全员槽位（远端世界模型显隐依据）；UserUID 是自己时按槽位记录物品 UID，启用对应武器的输入。
-    public struct BioChemWeaponSlotMessage : NetworkMessage
+// C2S 只请求栏位（UserUID 忽略），Slot=None=收起当前武器。服务端结算后向全员广播：
+// UserUID=玩家、Slot=新槽位、ItemUID=发放的物品 UID（近战/投掷物无实体=0）。
+// 各端记录全员槽位（远端世界模型显隐依据）；UserUID 是自己时按槽位记录物品 UID，启用对应武器的输入。
+public struct BioChemWeaponSlotMessage : NetworkMessage
     {
         public ulong UserUID;
         public byte Slot;
@@ -89,9 +89,14 @@ namespace BioChem
         internal static StudentWeaponSlot RemoteSlotOf(ulong uid)
             => slotByUid.TryGetValue(uid, out var slot) ? slot : StudentWeaponSlot.None;
 
-        // 各端应用槽位广播/快照：记录全员槽位；自己则按槽位记录发放的物品 UID
+        // 各端应用槽位广播/快照。Slot=None=收起广播：只清全员槽位视图（localSlotItemUid 保留，回收窗口仍要拦原生开火）
         internal static void ApplyIssuedItem(BioChemWeaponSlotMessage message)
         {
+            if (message.Slot == (byte)StudentWeaponSlot.None)
+            {
+                if (message.UserUID != 0) slotByUid[message.UserUID] = StudentWeaponSlot.None;
+                return;
+            }
             if (!IsValid(message.Slot)) return;
             if (message.UserUID != 0) slotByUid[message.UserUID] = (StudentWeaponSlot)message.Slot;
             if (UnitManager.IsSingletonActive() && message.UserUID == UnitManager.Instance.localPlayerUID

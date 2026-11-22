@@ -115,6 +115,12 @@ if ($preview) {
 
 if ($ChangeNote -ne '') { Set-VdfKey $vdfPath 'changenote' $ChangeNote }
 
+# 防呆：description 必须是单行键值（值内换行写成字面 \n）——多行/空值会让上传器逐行解析不到，
+# 静默发送空描述，Steam 侧描述保持旧版不更新（v1.10.2 曾因工具写坏 vdf 踩过这个坑）
+if ((Get-Content -Raw -Encoding UTF8 $vdfPath) -notmatch '(?m)^\s*"description"\s+"[^"]{10,}"\s*\r?$') {
+    throw 'vdf 的 description 不是合法单行键值（值里混入了真实换行或为空），上传器会静默跳过导致 Steam 描述不更新'
+}
+
 $existingId = ((Get-Content -Raw -Encoding UTF8 $vdfPath) | Select-String -Pattern '"publishedfileid"\s+"(\d+)"').Matches
 if ($existingId.Count -gt 0 -and $existingId[0].Groups[1].Value -ne '') {
     Write-Host ("[状态] 工坊物品：已存在（PublishedFileId={0}），本次为更新" -f $existingId[0].Groups[1].Value)

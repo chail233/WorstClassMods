@@ -88,13 +88,11 @@ namespace BioChem
         public ulong AttackerUID;  // Hit 用：猎手攻击=攻击者 UID（本机预测过音效就不再播广播音效）
     }
 
-    /// <summary>学生近战尼泊尔军刀。Kind: 1=LightStrike（C2S，左键轻击，可长按连击） 2=HeavyStrike（C2S，右键重击）
-    /// 3=Swing（S2C，挥刀广播：UnitUID=攻击者，Heavy=重击；攻击者本地已预测，身体动画走 PlayAnimSync 原生同步）
-    /// 4=Hit（S2C，扣血结算：UnitUID=目标 Hp=剩余 HP，AttackerUID=攻击者防双响）
-    /// 命中判定在挥刀动作末端：服务端收到 Strike 先广播 Swing，延迟 HitDelay 秒后才做扇形判定（CF 军刀手感）</summary>
+    /// <summary>近战消息。Kind: 1=LightStrike/2=HeavyStrike（C2S 军刀） 3=Swing（S2C 挥刀广播） 4=Hit（S2C 扣血）
+    /// 5=MiniStrike（C2S 小老师教棍，Stamina=申报体力） 6=MiniSwing（S2C 教棍挥动广播）</summary>
     public struct BioChemMeleeMessage : NetworkMessage
     {
-        public const byte LightStrike = 1, HeavyStrike = 2, Swing = 3, Hit = 4;
+        public const byte LightStrike = 1, HeavyStrike = 2, Swing = 3, Hit = 4, MiniStrike = 5, MiniSwing = 6;
         public byte Kind;
         public bool Heavy;         // Swing 用：是否重击（挥刀表现更慢更大）
         public ulong UnitUID;      // Strike/Swing=攻击者 / Hit=目标
@@ -102,6 +100,7 @@ namespace BioChem
         public Vector3 Origin;     // Strike 用：出手瞬间位置（服务端 5m 伪造门槛）
         public Vector3 Direction;  // Strike 用：出手瞬间准星方向（挥刀末端以服务端权威位置+此方向判定）
         public ulong AttackerUID;  // Hit 用：攻击者 UID
+        public float Stamina;      // MiniStrike 用：申报体力（服务端 clamp 后校验，命中才扣）
     }
 
     /// <summary>生化手雷（每人最多 1 颗，服务端权威）。Kind: 1=Throw（C2S） 2=Spawn（S2C，出生参数广播给其他端本地模拟）
@@ -147,7 +146,6 @@ namespace BioChem
     {
         internal static Action<string> Log;
 
-        internal static readonly KeyCode StunKey = KeyCode.F;       // 小老师击晕
         internal const KeyCode PanelKey = KeyCode.F7;               // 管理面板开关
         private const string HarmonyId = "worstclass.biochem";
         private const int ClassStateChangedMsgId = 301;
@@ -175,7 +173,6 @@ namespace BioChem
         internal const float HunterScale = 1.3f;        // 猎手模型放大倍数（视觉+受击盒一起变大）
         internal const float HunterAttackRange = 2.2f;  // 猎手近战范围（水平距离）
         internal const float HunterSlashAngle = 120f;   // 猎手挥刀扇形总角度（CF 生化近战手感：面前群体判定）
-        internal const int HunterTakenDamage = 2;       // 老师剑击/小老师击晕命中猎手的扣血
         internal static uint version;
         private static float nextRepublish;
 
@@ -305,6 +302,13 @@ namespace BioChem
                     postfix: new HarmonyMethod(typeof(ModEntry), "AfterSlashStudentFilter"));
                 harmony.Patch(AccessTools.Method(typeof(UnitMessageHandler), "OnChalkHitRequest"),
                     prefix: new HarmonyMethod(typeof(ModEntry), "BeforeChalkHit"));
+                // 粉笔（远程弹体）打猎手：碰撞过滤与触发门槛都按 IsTeacher 拒收目标，补丁放行猎手
+                harmony.Patch(AccessTools.Method(typeof(ProjectileComponent), "IsValidCollision"),
+                    prefix: new HarmonyMethod(typeof(ModEntry), "BeforeChalkCollision"));
+                harmony.Patch(AccessTools.Method(typeof(ProjectileComponent), "OnTriggerEnter",
+                        new Type[] { typeof(Unit), typeof(UnityEngine.Collider) }),
+                    prefix: new HarmonyMethod(typeof(ModEntry), "BeforeChalkTriggerEnter"),
+                    finalizer: new HarmonyMethod(typeof(ModEntry), "AfterChalkTriggerEnter"));
                 // 猎手固定只能用近战：吞掉手持物品（书/零食/墨水/手机/火锅等）与嘴部物品（吹箭/泡泡糖/气球）的全部输入
                 harmony.Patch(AccessTools.Method(typeof(StudentItemUseComponent), "GetCmdInput"),
                     prefix: new HarmonyMethod(typeof(ModEntry), "BeforeHunterStudentItemInput"));
@@ -339,6 +343,9 @@ namespace BioChem
                 // 我们的吹箭没有原版眩晕：只在本次原生结算窗口里让 TryStun 返回 false（学生被打=完全无效）
                 harmony.Patch(AccessTools.Method(typeof(TaserProjectile), "TryStun"),
                     prefix: new HarmonyMethod(typeof(ModEntry), "BeforeTaserTryStun"));
+                // 减速客机保底（原生 TaserHit_S2C 全端必达，见 AfterTaserHitApply）
+                harmony.Patch(AccessTools.Method(typeof(TaserProjectile), "ApplyHit"),
+                    postfix: new HarmonyMethod(typeof(ModEntry), "AfterTaserHitApply"));
                 // 连发模式吞掉原生单击开火（否则一发就把嘴里的吹箭消耗掉），由 mod 连发循环接管；瞄准不受影响
                 harmony.Patch(AccessTools.Method(typeof(TaserComponent), "HandleInput"),
                     prefix: new HarmonyMethod(typeof(ModEntry), "BeforeTaserHandleInput"));
@@ -387,15 +394,20 @@ namespace BioChem
 
         // ===== 身份翻转（感染 = 对全游戏表现为老师） =====
 
+        // 翻转抑制小窗：粉笔命中猎手期间对该 uid 按原生身份判定（finalizer 兜底清零）
+        private static ulong flipSuppressUid;
+
         public static void AfterIsTeacher(Unit __instance, ref bool __result)
         {
             if (__result || !enabled || __instance == null) return;
+            if (__instance.UID == flipSuppressUid) return;
             if (infected.Contains(__instance.UID) || hunters.Contains(__instance.UID)) __result = true;
         }
 
         public static void AfterIsStudent(Unit __instance, ref bool __result)
         {
             if (!__result || !enabled || __instance == null) return;
+            if (__instance.UID == flipSuppressUid) return;
             if (infected.Contains(__instance.UID) || hunters.Contains(__instance.UID)) __result = false;
         }
 
@@ -486,26 +498,46 @@ namespace BioChem
                 float retryAt = pillarRetryAt.TryGetValue(pillarUID, out float retry) ? retry : 0f;
                 if (Time.unscaledTime < retryAt) continue;
                 pillarRetryAt[pillarUID] = Time.unscaledTime + 1f; // 失败重试节流
-                Unit pillar = UnitManager.Instance.GetUnitByUID(pillarUID);
-                var pillarComp = pillar != null ? pillar.GetComponent<PunishPillarComponent>() : null;
-                if (pillarComp == null || pillarComp.bindStudent == null || pillarComp.bindStudent.UID != studentUID)
-                {
-                    pillarBinds.Remove(pillarUID);
-                    pillarRetryAt.Remove(pillarUID);
-                    continue;
-                }
-                var request = new StudentReleaseMessageRequest_C2S { pillarUID = pillarUID, studentUID = studentUID, teacherUID = 0 };
-                // internal 方法走反射：返回 true = 已完全释放（rescuer=本人 → 不触发救援惩罚）
-                object result = ReleaseStudentOnServerMethod.Invoke(
-                    RoomManager.Instance.GetSkillMessageHandler(),
-                    new object[] { studentUID, request, false, null });
-                if (result is bool released && released)
-                {
-                    pillarBinds.Remove(pillarUID);
-                    pillarRetryAt.Remove(pillarUID);
-                    InfectStudent(studentUID);
-                }
+                ForceReleaseAndInfect(pillarUID, studentUID);
             }
+        }
+
+        // 强制释放挂柱学生并立即感染（rescuer=本人避免救援惩罚），返回是否真的感染了
+        private static bool ForceReleaseAndInfect(ulong pillarUID, ulong studentUID)
+        {
+            Unit pillar = UnitManager.Instance.GetUnitByUID(pillarUID);
+            var pillarComp = pillar != null ? pillar.GetComponent<PunishPillarComponent>() : null;
+            if (pillarComp == null || pillarComp.bindStudent == null || pillarComp.bindStudent.UID != studentUID)
+            {
+                pillarBinds.Remove(pillarUID);
+                pillarRetryAt.Remove(pillarUID);
+                return false;
+            }
+            var request = new StudentReleaseMessageRequest_C2S { pillarUID = pillarUID, studentUID = studentUID, teacherUID = 0 };
+            // internal 方法走反射：返回 true = 已完全释放（rescuer=本人 → 不触发救援惩罚）
+            object result = ReleaseStudentOnServerMethod.Invoke(
+                RoomManager.Instance.GetSkillMessageHandler(),
+                new object[] { studentUID, request, false, null });
+            if (result is bool released && released)
+            {
+                pillarBinds.Remove(pillarUID);
+                pillarRetryAt.Remove(pillarUID);
+                InfectStudent(studentUID);
+                return true;
+            }
+            return false;
+        }
+
+        // 猎手变身瞬间：柱上的学生全部立即感染（释放失败的条目由超时 Tick 重试兜底）
+        private static void InfectPillarStudentsNow()
+        {
+            if (!enabled || pillarBinds.Count == 0) return;
+            if (!RoomManager.IsSingletonActive() || !UnitManager.IsSingletonActive()) return;
+            int bound = pillarBinds.Count;
+            foreach (var pair in new List<KeyValuePair<ulong, (ulong student, float start)>>(pillarBinds))
+                ForceReleaseAndInfect(pair.Key, pair.Value.student);
+            if (pillarBinds.Count < bound)
+                Log("[状态] 猎手出动：柱子上的学生已全部感染");
         }
 
         private static void TryApplyInitialInfection()
@@ -542,6 +574,11 @@ namespace BioChem
             stamina[uid] = Config.staminaMax;
             StudentWeapons.RemovePlayer(uid);
             MiniTeacherCatch.EnsureCatchAbility(uid); // 感染即补挂原生 CatchComponent（抓取/挂柱能力）
+            if (UnitManager.IsSingletonActive())
+            {
+                Unit infectedUnit = UnitManager.Instance.GetUnitByUID(uid);
+                if (infectedUnit != null) MiniTeacherMelee.Ensure(infectedUnit); // 感染即发教棍（单位未就绪时 Tick 自愈兜底）
+            }
             if (UnitManager.IsSingletonActive() && uid == UnitManager.Instance.localPlayerUID)
             {
                 selfStamina = Config.staminaMax;
@@ -1148,9 +1185,7 @@ namespace BioChem
             }
         }
 
-        // 各端数据同步：被命中者把减速层数校准到服务端权威值（消息里带 SlowStacks，服务端封顶+过期裁剪；
-        // 旧版本地盲加一层，层数在丢包/抖动下与主机漂移，表现成"减速只在主机生效"）。
-        // 弹道/音效/特效由原生 ApplyHit 播放
+        // 各端把被命中者的减速层数校准到服务端权威值（SlowStacks）；弹道/音效/特效由原生 ApplyHit 播放
         private static void ApplyDartHit(BioChemDartMessage message)
         {
             if (message.TargetHp >= 0) hp[message.TargetUID] = message.TargetHp;
@@ -1164,6 +1199,22 @@ namespace BioChem
                 NotifySelf("你被吹箭命中！剩余 HP " + message.TargetHp);
                 Log("[状态] 本端命中同步：HP " + message.TargetHp + "，减速 " + selfSlowExpiries.Count + " 层");
             }
+        }
+
+        // 减速客机保底：受害者本机盲加一层，Hit 校准广播到达时拉回服务端权威值
+        public static void AfterTaserHitApply(TaserHit_S2C message)
+        {
+            if (!enabled || NetRuntime.IsServer) return;
+            if (!message.collided || !IsModDartUid(message.itemUID) || IsPistolShotUid(message.itemUID)) return; // 手枪不减速
+            if (!UnitManager.IsSingletonActive()) return;
+            if (message.targetUID != UnitManager.Instance.localPlayerUID) return;
+            Unit self = UnitManager.Instance.GetUnitByUID(message.targetUID);
+            if (self == null || !self.isActived || self.IsDead || !self.IsTeacher) return;
+            if (hunters.Contains(self.UID) || downedUntil.ContainsKey(self.UID)) return; // 猎手/倒地不吃吹箭减速
+            PruneSelfSlow();
+            if (selfSlowExpiries.Count >= Config.dartSlowMaxStacks)
+                selfSlowExpiries.RemoveAt(0);
+            selfSlowExpiries.Add(Time.unscaledTime + Config.dartSlowSeconds);
         }
 
         // ===== 吃东西补弹检测 =====
@@ -1210,71 +1261,131 @@ namespace BioChem
             __result *= Mathf.Max(0.05f, 1f - Config.dartSlowPerStack * selfSlowExpiries.Count);
         }
 
-        // ===== 小老师击晕 =====
+        // ===== 小老师教棍（左键近战） =====
 
-        internal static void TryMiniStun()
+        // 本地预测表现；命中判定在服务端。命中才扣体力（本机与服务端同口径收集，空挥两边都不扣）
+        private static void TickMiniMelee()
         {
-            if (!CanClassAct() || !enabled) return;
-            if (!UnitManager.IsSingletonActive()) return;
-            ulong self = UnitManager.Instance.localPlayerUID;
-            if (!infected.Contains(self)) return;
+            if (!enabled || !infected.Contains(UnitManager.IsSingletonActive() ? UnitManager.Instance.localPlayerUID : 0)) return;
+            if (!Input.GetMouseButtonDown(0)) return; // 单击挥棍（连点受攻击间隔限制）
             if (Time.unscaledTime < localStunReadyAt) return;
+            if (!CanClassAct() || !UnitManager.IsSingletonActive()) return;
+            ulong self = UnitManager.Instance.localPlayerUID;
             float have = SelfStamina();
-            if (have < Config.staminaCostPerStun) return;
+            if (have < Config.staminaCostPerStun) return; // 体力不足：不挥（HUD 有提示）
             Unit selfUnit = UnitManager.Instance.GetUnitByUID(self);
             if (selfUnit == null || !selfUnit.isActived || selfUnit.IsDead || selfUnit.IsStun) return;
-            Unit target = FindStunTarget(selfUnit);
-            if (target == null) return;
-            localStunReadyAt = Time.unscaledTime + Config.miniStunCooldownSeconds;
-            // 本地模拟立即扣减；服务端按申报值校验后记录权威值，漂移自愈
-            selfStamina = Mathf.Max(0f, have - Config.staminaCostPerStun);
-            var message = new BioChemStunMessage { Kind = BioChemStunMessage.Request, TargetUID = target.UID, Stamina = have };
-            if (NetRuntime.IsServer) OnServerStun(null, message);
+            localStunReadyAt = Time.unscaledTime + Config.miniMeleeInterval;
+            selfUnit.GetComponent<AnimationComponent>()?.PlayAnimSync("Throw"); // 学生动画机有 Throw（投掷挥臂），原生同步全员可见
+            MiniTeacherMelee.PlaySwing(self); // 本地预测：自己的棍先摆（viewmodel）
+            PlayHunterSound(AudioEvents.sfx_DoubaoSwordSwing_sfx, selfUnit.Position);
+            Vector3 direction = Vector3.zero;
+            if (MonoSingletonT<SceneManager>.IsSingletonActive())
+            {
+                Camera cam = MonoSingletonT<SceneManager>.Instance.MainCamera;
+                if (cam != null) direction = cam.transform.forward;
+            }
+            // 本机预测同一口径：命中才本地扣体力；空挥不扣，结算听服务端
+            Vector3 forward = direction;
+            forward.y = 0f;
+            if (forward.sqrMagnitude < 0.0001f) { forward = selfUnit.transform.forward; forward.y = 0f; }
+            forward.Normalize();
+            CollectMiniTargets(selfUnit, forward, sweepBuffer);
+            if (sweepBuffer.Count > 0)
+                selfStamina = Mathf.Max(0f, have - Config.staminaCostPerStun);
+            var message = new BioChemMeleeMessage
+            {
+                Kind = BioChemMeleeMessage.MiniStrike,
+                Origin = selfUnit.Position,
+                Direction = direction, // 零向量时服务端兜底身体朝向
+                Stamina = have
+            };
+            if (NetRuntime.IsServer) OnServerMelee(null, message);
             else if (RoomManager.IsSingletonActive()) RoomManager.Instance.SendToServer(message);
         }
 
-        private static Unit FindStunTarget(Unit self)
+        // 服务端结算：扇形群体判定——学生击晕、猎手只扣血不吃眩晕；命中才扣体力，攻击间隔服务端权威
+        private static void OnServerMiniStrike(NetworkConnectionToClient connection, BioChemMeleeMessage message)
         {
-            Unit best = null;
-            float bestDist = Config.miniStunRange;
-            foreach (Unit unit in UnitManager.Instance.playerList)
+            try
             {
-                if (unit == null || !unit.isActived || unit.IsDead || unit.IsStun) continue;
-                bool targetable = unit.IsStudent || hunters.Contains(unit.UID); // 猎手对游戏已是老师身份，单独放行
-                if (!targetable) continue;
-                float dist = Vector3.Distance(self.Position, unit.Position);
-                if (dist < bestDist) { bestDist = dist; best = unit; }
+                if (!enabled || !ServerClassActive() || !UnitManager.IsSingletonActive()) return;
+                ulong sender = ResolveSender(connection);
+                if (sender == 0 || !infected.Contains(sender)) return;
+                if (Time.unscaledTime < (stunCooldownUntil.TryGetValue(sender, out float readyAt) ? readyAt : 0f)) return;
+                Unit attacker = UnitManager.Instance.GetUnitByUID(sender);
+                if (attacker == null || !attacker.isActived || attacker.IsDead || attacker.IsStun) return;
+                Vector3 origin = message.Origin;
+                if ((new Vector3(origin.x, 0f, origin.z) - new Vector3(attacker.Position.x, 0f, attacker.Position.z)).sqrMagnitude > 25f) return;
+                // 申报体力 clamp 校验（防伪造）
+                float claimed = Mathf.Clamp(message.Stamina, 0f, Config.staminaMax);
+                if (claimed < Config.staminaCostPerStun) return;
+                stunCooldownUntil[sender] = Time.unscaledTime + Config.miniMeleeInterval;
+                var swing = new BioChemMeleeMessage { Kind = BioChemMeleeMessage.MiniSwing, UnitUID = sender };
+                Broadcast(swing);
+                ApplyMiniSwingLocal(swing); // 房主本机（Broadcast 不含房主）；攻击者本地已预测
+                Vector3 forward = message.Direction;
+                forward.y = 0f;
+                if (forward.sqrMagnitude < 0.0001f) { forward = attacker.transform.forward; forward.y = 0f; }
+                forward.Normalize();
+                CollectMiniTargets(attacker, forward, sweepBuffer);
+                if (sweepBuffer.Count > 0)
+                    stamina[sender] = Mathf.Max(0f, claimed - Config.staminaCostPerStun); // 命中才扣（空挥免费）
+                foreach (Unit target in sweepBuffer)
+                {
+                    if (hunters.Contains(target.UID))
+                    {
+                        // 猎手不吃眩晕（0.5s 一刀的晕锁链会把猎手按在地上打）：只按老师攻击力扣血，归零自动感染
+                        DamageHunter(target.UID, Config.teacherAttackDamage, sender);
+                        Log("[状态] 小老师 " + GetName(sender) + " 教棍命中猎手 " + GetName(target.UID));
+                    }
+                    else
+                    {
+                        var apply = new BioChemStunMessage { Kind = BioChemStunMessage.Apply, TargetUID = target.UID, Duration = Config.miniStunSeconds };
+                        Broadcast(apply);
+                        ApplyStunLocal(apply.TargetUID, apply.Duration);
+                        Log("[状态] 小老师 " + GetName(sender) + " 教棍击晕了 " + GetName(target.UID));
+                    }
+                }
+                if (sweepBuffer.Count > 0) BroadcastState(); // 体力变化随快照对齐
             }
-            return best;
+            catch (Exception e)
+            {
+                Log("小老师教棍结算失败：" + e.Message);
+            }
         }
 
-        private static void OnServerStun(NetworkConnectionToClient connection, BioChemStunMessage message)
+        // 目标收集（与服务端判定同口径）：miniStunRange 内 miniMeleeAngle 扇形里的存活学生/猎手；
+        // 已晕学生跳过，猎手可反复补刀
+        private static void CollectMiniTargets(Unit attacker, Vector3 forward, List<Unit> results)
         {
-            if (!NetRuntime.IsServer || message.Kind != BioChemStunMessage.Request) return;
-            if (!enabled || !ServerClassActive()) return;
-            ulong senderUID = ResolveSender(connection);
-            if (!infected.Contains(senderUID)) return;
-            if (Time.unscaledTime < (stunCooldownUntil.TryGetValue(senderUID, out float until) ? until : 0f)) return;
-            // 体力以申报值为准（各端本地模拟），clamp 后校验够不够；不够直接拒绝
-            float claimed = Mathf.Clamp(message.Stamina, 0f, Config.staminaMax);
-            if (claimed < Config.staminaCostPerStun) return;
-            if (!UnitManager.IsSingletonActive()) return;
-            Unit sender = UnitManager.Instance.GetUnitByUID(senderUID);
-            Unit target = UnitManager.Instance.GetUnitByUID(message.TargetUID);
-            if (sender == null || !sender.isActived || sender.IsDead || sender.IsStun) return;
-            bool targetIsHunter = hunters.Contains(message.TargetUID);
-            if (target == null || !target.isActived || target.IsDead || target.IsStun) return;
-            if (!target.IsStudent && !targetIsHunter) return; // 学生或猎手（猎手对游戏已是老师身份，单独放行）
-            if (Vector3.Distance(sender.Position, target.Position) > Config.miniStunRange + 0.5f) return;
+            results.Clear();
+            float maxDistSqr = Config.miniStunRange * Config.miniStunRange;
+            foreach (Unit unit in UnitManager.Instance.playerList)
+            {
+                if (unit == null || !unit.isActived || unit.IsDead) continue;
+                bool isHunter = hunters.Contains(unit.UID);
+                bool isStudent = unit.IsStudent && !infected.Contains(unit.UID); // 翻转属性已排除感染者/猎手，双保险
+                if (!isStudent && !isHunter) continue;
+                if (isHunter && (downedUntil.ContainsKey(unit.UID) || killedTeachers.Contains(unit.UID))) continue;
+                if (isStudent && unit.IsStun) continue;
+                Vector3 to = unit.Position - attacker.Position;
+                to.y = 0f; // 水平距离判定：跳起/蹲下不影响命中
+                if (to.sqrMagnitude > maxDistSqr) continue;
+                if (to.sqrMagnitude > 0.0001f && Vector3.Angle(forward, to) > Config.miniMeleeAngle * 0.5f) continue;
+                results.Add(unit);
+            }
+        }
 
-            stamina[senderUID] = Mathf.Max(0f, claimed - Config.staminaCostPerStun);
-            stunCooldownUntil[senderUID] = Time.unscaledTime + Config.miniStunCooldownSeconds;
-            var apply = new BioChemStunMessage { Kind = BioChemStunMessage.Apply, TargetUID = target.UID, Duration = Config.miniStunSeconds };
-            Broadcast(apply);
-            ApplyStunLocal(apply.TargetUID, apply.Duration);
-            if (targetIsHunter) DamageHunter(target.UID, HunterTakenDamage, senderUID); // 晕猎手=晕住+扣血
-            BroadcastState();
-            Log("[状态] 小老师 " + GetName(senderUID) + (targetIsHunter ? " 击晕了猎手 " : " 击晕了 ") + GetName(target.UID));
+        // 各端教棍挥动表现：攻击者本地已预测（跳过），其他端摆棍 + 在攻击者位置播挥击音效
+        private static void ApplyMiniSwingLocal(BioChemMeleeMessage message)
+        {
+            if (message.UnitUID == (UnitManager.IsSingletonActive() ? UnitManager.Instance.localPlayerUID : 0)) return;
+            MiniTeacherMelee.PlaySwing(message.UnitUID);
+            if (!UnitManager.IsSingletonActive()) return;
+            Unit attacker = UnitManager.Instance.GetUnitByUID(message.UnitUID);
+            if (attacker != null && attacker.isActived)
+                PlayHunterSound(AudioEvents.sfx_DoubaoSwordSwing_sfx, attacker.Position);
         }
 
         // 各端应用：学生眩晕指定时长（带精确时长的投射物眩晕通道，与电击枪表现一致）
@@ -1467,6 +1578,7 @@ namespace BioChem
             ApplyHunterTransformLocal(message);
             BroadcastState();
             Log("[状态] " + GetName(uid) + " 变身成了老师猎手（HP " + Config.hunterHp + "）");
+            InfectPillarStudentsNow(); // 猎手出动：柱子上的学生全部立即感染
         }
 
         // 各端变身表现：先入 hunters（身份翻转/物品封禁立刻生效，模型未绑定的过渡帧也不能丢身份），
@@ -1757,6 +1869,7 @@ namespace BioChem
         private static void OnServerMelee(NetworkConnectionToClient connection, BioChemMeleeMessage message)
         {
             if (!NetRuntime.IsServer) return;
+            if (message.Kind == BioChemMeleeMessage.MiniStrike) { OnServerMiniStrike(connection, message); return; }
             bool heavy = message.Kind == BioChemMeleeMessage.HeavyStrike;
             if (message.Kind != BioChemMeleeMessage.LightStrike && !heavy) return;
             try
@@ -2001,10 +2114,11 @@ namespace BioChem
         }
 
         // 猎手固定只能用近战武器：两个物品输入总入口（MsgCenter 100）对猎手全部吞掉
+        // 猎手/小老师的物品输入全部吞掉（教棍是唯一攻击，防手持物左键双重触发）
         private static bool HunterItemInputBlocked(Unit owner)
         {
             if (!enabled || owner == null || !owner.isPlayer) return false;
-            return hunters.Contains(owner.UID);
+            return hunters.Contains(owner.UID) || infected.Contains(owner.UID);
         }
 
         public static bool BeforeHunterStudentItemInput(StudentItemUseComponent __instance)
@@ -2037,8 +2151,39 @@ namespace BioChem
             Unit hunter = UnitManager.IsSingletonActive() ? UnitManager.Instance.GetUnitByUID(request.UnitUID) : null;
             if (hunter == null || !hunter.isActived || hunter.IsDead) return false;
             if ((hunter.Position - request.Position).sqrMagnitude > 9f) return true; // 与原生同款 3m 门槛，伪造上报交回原生拒绝
-            DamageHunter(request.UnitUID, HunterTakenDamage, request.TeacherUID);
+            DamageHunter(request.UnitUID, Config.teacherAttackDamage, request.TeacherUID);
             return false;
+        }
+
+        private static readonly int ChalkHitBoxLayer = LayerMask.NameToLayer("HitBox");
+
+        // 射手是教师阵营且目标是存活猎手时按学生同款 HitBox 层规则放行，其余交回原生判定
+        public static bool BeforeChalkCollision(Collider other, ulong shooterUid, ref bool __result)
+        {
+            if (!enabled || other == null || !UnitManager.IsSingletonActive()) return true;
+            Unit shooter = UnitManager.Instance.GetUnitByUID(shooterUid);
+            if (shooter == null || !shooter.isActived || !shooter.IsTeacher) return true; // 学生的粉笔不打自己人
+            ObjectModel componentInParent = other.GetComponentInParent<ObjectModel>();
+            Unit unit = componentInParent != null ? UnitManager.Instance.GetUnitByUID(componentInParent.UID) : null;
+            if (unit == null || !unit.isActived || unit.IsDead || !hunters.Contains(unit.UID)) return true;
+            __result = other.gameObject.layer == ChalkHitBoxLayer;
+            return false;
+        }
+
+        // 目标是猎手且射手为教师阵营时开翻转抑制小窗，原生 IsTeacher 门槛按原生身份放行
+        public static void BeforeChalkTriggerEnter(ProjectileComponent __instance, Unit otherUnit)
+        {
+            flipSuppressUid = 0;
+            if (!enabled || otherUnit == null || !hunters.Contains(otherUnit.UID)) return;
+            if (!UnitManager.IsSingletonActive()) return;
+            Unit shooter = UnitManager.Instance.GetUnitByUID(__instance.netData.CreaterUID);
+            if (shooter == null || !shooter.isActived || !shooter.IsTeacher) return;
+            flipSuppressUid = otherUnit.UID;
+        }
+
+        public static void AfterChalkTriggerEnter(Exception __exception)
+        {
+            flipSuppressUid = 0;
         }
 
         // 猎手被打（老师剑击/小老师击晕）：扣 HP，归零=直接感染
@@ -2165,6 +2310,7 @@ namespace BioChem
             localHunterStrikeReadyAt = 0f;
             hunterUnlockAnnounced = false;
             HunterKnife.RemoveAll(); // 猎刀随回合重置全收（模式关闭也走这里）
+            MiniTeacherMelee.RemoveAll(); // 教棍随回合重置全收（模式关闭也走这里）
             MiniTeacherCatch.RemoveAll(); // 收回小老师抓取组件（学生状态由原生回合重置负责）
         }
 
@@ -2203,6 +2349,7 @@ namespace BioChem
             pendingStrikes.RemoveAll(s => s.attacker == playerUID);
             BioGrenade.RemoveOwner(playerUID); // 其飞行中的手雷一并销毁
             StudentKukri.Remove(playerUID);
+            MiniTeacherMelee.Remove(playerUID); // 断线清理：教棍随单位销毁，这里清 rig 注册表
             MiniTeacherCatch.RemoveCatchAbility(playerUID); // 断线清理：注销组件上的 msg 2017 监听
             if (hunterOrigScale.Remove(playerUID) && UnitManager.IsSingletonActive())
             {
@@ -2283,6 +2430,8 @@ namespace BioChem
                 if (uid == 0) continue;
                 infected.Add((ulong)uid);
                 MiniTeacherCatch.EnsureCatchAbility((ulong)uid); // 快照即补抓取组件（单位未就绪时 Tick 自愈兜底）
+                Unit infectedUnit = UnitManager.IsSingletonActive() ? UnitManager.Instance.GetUnitByUID((ulong)uid) : null;
+                if (infectedUnit != null) MiniTeacherMelee.Ensure(infectedUnit); // 快照即补教棍（单位未就绪时 Tick 自愈兜底）
             }
             hunters.Clear();
             foreach (long uid in dto.hunters)
@@ -2366,10 +2515,12 @@ namespace BioChem
             PistolWeapon.Tick();
             StudentKukri.Tick(); // 持刀显隐+挥刀驱动+自愈（无持刀者时零开销早退）
             HunterKnife.Tick(); // 挥刀驱动+自愈（无猎手时零开销早退）
+            MiniTeacherMelee.Tick(); // 挥棍驱动+自愈（无小老师时零开销早退）
             BioGrenade.Tick();  // 飞行手雷清理+手持模型驱动
             if (enabled)
             {
                 TickHunterMelee();
+                TickMiniMelee();      // 小老师教棍输入（本地预测挥棍，结算听服务端）
                 TickStudentMelee();   // 军刀轻击/重击输入（本地预测反馈延迟调度）
                 TickKukriFeedback();  // 军刀挥刀末端的本地预测反馈
                 MiniTeacherCatch.TickSelfHeal(); // 感染名单里的抓取组件自愈（1s 节流）
@@ -2478,7 +2629,6 @@ namespace BioChem
             if (slot != StudentWeaponSlot.None && NetRuntime.IsConnected && UnitManager.IsSingletonActive()
                 && StudentWeapons.CanSelect(UnitManager.Instance.localPlayer))
                 SelectWeaponSlot(slot);
-            if (kb.GetKeyDown(StunKey)) TryMiniStun();
             if (kb.GetKeyDown(KeyCode.R))
             {
                 if (StudentWeapons.Selected == StudentWeaponSlot.Primary) Ak47Weapon.TryReload();
@@ -2576,15 +2726,17 @@ namespace BioChem
         private static void SelectWeaponSlot(StudentWeaponSlot slot)
         {
             if (!RoomManager.IsSingletonActive()) return;
-            StudentWeapons.SelectLocal(slot);
-            var message = new BioChemWeaponSlotMessage { Slot = (byte)slot };
+            bool holster = StudentWeapons.Selected == slot; // 手里已是这栏：同键再按=收起（Slot=None），按任意栏位键重新掏出
+            StudentWeapons.SelectLocal(holster ? StudentWeaponSlot.None : slot);
+            var message = new BioChemWeaponSlotMessage { Slot = (byte)(holster ? StudentWeaponSlot.None : slot) };
             if (NetRuntime.IsServer) OnServerWeaponSlot(null, message);
             else RoomManager.Instance.SendToServer(message);
         }
 
         private static void OnServerWeaponSlot(NetworkConnectionToClient connection, BioChemWeaponSlotMessage message)
         {
-            if (!enabled || !NetRuntime.IsServer || !UnitManager.IsSingletonActive() || !StudentWeapons.IsValid(message.Slot)) return;
+            if (!enabled || !NetRuntime.IsServer || !UnitManager.IsSingletonActive()) return;
+            if (message.Slot != (byte)StudentWeaponSlot.None && !StudentWeapons.IsValid(message.Slot)) return; // None=收起请求
             ulong uid = ResolveSender(connection);
             if (uid == 0) return;
             Unit student = UnitManager.Instance.GetUnitByUID(uid);
@@ -2673,7 +2825,6 @@ namespace BioChem
         {
             NetworkServer.RegisterHandler<BioChemDartMessage>(OnServerDart, true);
             NetworkServer.RegisterHandler<BioChemWeaponSlotMessage>(OnServerWeaponSlot, true);
-            NetworkServer.RegisterHandler<BioChemStunMessage>(OnServerStun, true);
             NetworkServer.RegisterHandler<BioChemWriteMessage>(OnServerWrite, true);
             NetworkServer.RegisterHandler<BioChemHunterMessage>(OnServerHunter, true);
             NetworkServer.RegisterHandler<BioChemMeleeMessage>(OnServerMelee, true);
@@ -2731,6 +2882,7 @@ namespace BioChem
             if (NetworkServer.active) return;
             if (message.Kind == BioChemMeleeMessage.Swing) ApplyMeleeSwingLocal(message);
             else if (message.Kind == BioChemMeleeMessage.Hit) ApplyMeleeHitLocal(message);
+            else if (message.Kind == BioChemMeleeMessage.MiniSwing) ApplyMiniSwingLocal(message);
         }
 
         private static void OnClientGrenade(BioChemGrenadeMessage message)

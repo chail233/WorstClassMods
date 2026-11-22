@@ -14,7 +14,7 @@ namespace BioChem
     {
         internal static Transform LoadObj(string path, string rootName, Color tint, float smoothness,
             float normalizeLength, float modelYawDeg, Vector3? objMuzzle, out Vector3 muzzleLocal,
-            string textureFile = null)
+            string textureFile = null, float modelRollDeg = 0f)
         {
             var positions = new List<Vector3>();
             var uvs = new List<Vector2>();
@@ -79,8 +79,8 @@ namespace BioChem
             var mesh = new Mesh { vertices = outVerts.ToArray(), triangles = triangles.ToArray(), normals = outNormals.ToArray(), uv = outUvs.ToArray() };
             if (!hasNormal || HasBrokenNormals(outNormals)) mesh.RecalculateNormals();
             if (!hasUv) mesh.uv = new Vector2[mesh.vertexCount];
-            // 先旋转到统一朝向（口沿 +Z），再按旋转后的 Z 长度归一化——OBJ 文件的长轴未必是 Z（Quaternius 枪包长轴在 X）
-            Quaternion rotation = Quaternion.Euler(0f, modelYawDeg, 0f);
+            // 先旋转到统一朝向（口沿 +Z）再按 Z 长度归一化；roll=绕枪管轴正过来（转换器 PCA 次轴符号随机）
+            Quaternion rotation = Quaternion.Euler(0f, modelYawDeg, 0f) * Quaternion.Euler(0f, 0f, modelRollDeg);
             var verts = mesh.vertices;
             var norms = mesh.normals;
             for (int i = 0; i < verts.Length; i++)
@@ -218,6 +218,69 @@ namespace BioChem
             go.layer = layer;
             foreach (Transform child in go.transform)
                 SetLayerRecursive(child.gameObject, layer);
+        }
+
+        // ===== 挥刀轨迹（TrailRenderer 拖尾，近战武器共用） =====
+
+        private static Material slashTrailMaterial;
+
+        // 在 parent 的 localPos（刀尖）创建挥刀拖尾，默认不发射（Sprites/Default 顶点色渐隐）
+        internal static TrailRenderer AttachSlashTrail(Transform parent, Vector3 localPos, Color color, float width)
+        {
+            if (slashTrailMaterial == null)
+            {
+                Shader shader = Shader.Find("Sprites/Default"); // URP 下可用（口焰 quad 同款）
+                if (shader == null) return null;
+                slashTrailMaterial = new Material(shader);
+            }
+            var go = new GameObject("slashTrail");
+            go.transform.SetParent(parent, false);
+            go.transform.localPosition = localPos;
+            TrailRenderer trail = go.AddComponent<TrailRenderer>();
+            trail.material = slashTrailMaterial;
+            trail.time = 0.3f;               // 每次挥刀按表现时长覆写：弧线全程可见，停手后淡出
+            trail.minVertexDistance = 0.025f;
+            trail.widthMultiplier = width;
+            trail.widthCurve = new AnimationCurve(new Keyframe(0f, 1f), new Keyframe(1f, 0.2f)); // 头粗尾细
+            trail.numCapVertices = 2;
+            trail.alignment = LineAlignment.View; // 面向相机成带，任意角度都能看清
+            trail.autodestruct = false;
+            trail.emitting = false;
+            trail.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            trail.receiveShadows = false;
+            // c1 变体 facade 无 TrailRenderer.color(Gradient)：用 start/endColor 做头亮尾透明的线性渐隐
+            trail.startColor = new Color(color.r, color.g, color.b, 0.9f);
+            trail.endColor = new Color(color.r, color.g, color.b, 0f);
+            return trail;
+        }
+
+        // 开挥：按本次挥刀时长设拖尾寿命（弧线全程可见），清掉上一段残影再开发射
+        internal static void EmitSlashTrail(TrailRenderer trail, float swingDuration)
+        {
+            if (trail == null) return;
+            trail.time = swingDuration;
+            trail.Clear();
+            trail.emitting = true;
+        }
+
+        internal static void StopSlashTrail(TrailRenderer trail)
+        {
+            if (trail == null) return;
+            trail.emitting = false; // 弧线按 time 自然淡出，不瞬消
+        }
+
+        // ===== 挥刀位姿（近战武器共用） =====
+
+        // 整刀绕腕前支点（沿刀背退 pivotDistance）刚体旋转，位置与朝向同轴同步转，刀刃贴弧线。
+        // swingAxisLocal 须无 Z 分量（保持支点⊥转轴）；pivotDistance=0 退化为原地自转
+        internal static void ApplySwingPose(Transform knife, Vector3 restPos, Quaternion restRot,
+            float angle, float zTilt, float pivotDistance, Vector3 swingAxisLocal)
+        {
+            Quaternion rot = restRot * Quaternion.AngleAxis(angle, swingAxisLocal) * Quaternion.Euler(0f, 0f, zTilt);
+            Quaternion delta = rot * Quaternion.Inverse(restRot);            // 相对静止姿态的刚体旋转
+            Vector3 pivot = restPos + (restRot * -Vector3.forward) * pivotDistance; // 支点在刀背延长线上（垂直于转轴）
+            knife.localPosition = pivot + delta * (restPos - pivot);
+            knife.localRotation = rot;
         }
 
         // GoldSrc（CS1.6）转换的法线曾混入骨骼平移（长度可达数十而非 1，着色整体发蓝/花掉）：

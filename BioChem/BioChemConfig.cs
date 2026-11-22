@@ -18,9 +18,10 @@ namespace BioChem
         public float staminaDrainPerSecond = 0.5f;// 小老师走路每秒耗体力
         public float staminaCostPerStun = 2f;     // 小老师每次击晕耗体力
         public float staminaPerWrite = 2f;        // 小老师每次完整写完板书回复的体力（长按读条期间缓慢回满这个量）
-        public float miniStunSeconds = 2.5f;      // 小老师击晕时长
-        public float miniStunCooldownSeconds = 10f;
-        public float miniStunRange = 2.2f;        // 小老师击晕触发距离
+        public float miniStunSeconds = 2.5f;      // 小老师教棍命中学生的击晕时长
+        public float miniStunRange = 2.2f;        // 小老师教棍攻击距离
+        public float miniMeleeInterval = 0.5f;    // 小老师教棍挥击间隔（攻速）
+        public float miniMeleeAngle = 120f;       // 小老师教棍扇形总角度（面前群体判定，与猎刀同口径）
         public int dartDamage = 1;                // 吹箭伤害（基础值）
         public float dartDamageBonusPerInfected = 0.25f; // 每个已感染学生（小老师）附加的吹箭伤害系数：伤害=基础×(1+min(感染数×本值,3))；0=关闭递增
         public int dartMaxAmmo = 200;             // 吹箭备弹上限；耗尽后无法射击，新一局自动回满
@@ -34,6 +35,7 @@ namespace BioChem
         public int hunterHp = 150;                // 老师猎手 HP（CF 终结者：能被围殴一阵）
         public int hunterDamage = 40;             // 猎手近战伤害：一刀秒小老师(36)，大老师(90)三刀
         public float hunterAttackInterval = 0.4f; // 猎手近战攻击间隔（前摇短、攻速快）
+        public int teacherAttackDamage = 2;       // 老师阵营攻击力：粉笔/剑击/小老师击晕命中猎手时扣的 HP
 
         // ===== 学生副武器手枪（按 2）：与 AK47 同管线（嘴叼 Taser 承载+虚拟弹体），弹匣节奏独立、无感染伤害加成 =====
         public int pistolDamage = 2;              // 手枪单发伤害
@@ -114,8 +116,9 @@ namespace BioChem
             staminaCostPerStun = Mathf.Max(0f, staminaCostPerStun);
             staminaPerWrite = Mathf.Max(0f, staminaPerWrite);
             miniStunSeconds = Mathf.Clamp(miniStunSeconds, 0.5f, 10f);
-            miniStunCooldownSeconds = Mathf.Max(0.5f, miniStunCooldownSeconds);
             miniStunRange = Mathf.Clamp(miniStunRange, 0.5f, 10f);
+            miniMeleeInterval = Mathf.Clamp(miniMeleeInterval, 0.1f, 10f);
+            miniMeleeAngle = Mathf.Clamp(miniMeleeAngle, 30f, 360f);
             dartDamage = Mathf.Max(1, dartDamage);
             dartDamageBonusPerInfected = Mathf.Clamp(dartDamageBonusPerInfected, 0f, 3f);
             dartMaxAmmo = Mathf.Clamp(dartMaxAmmo, 1, 9999);
@@ -129,6 +132,7 @@ namespace BioChem
             hunterHp = Mathf.Clamp(hunterHp, 1, 999);
             hunterDamage = Mathf.Clamp(hunterDamage, 1, 99);
             hunterAttackInterval = Mathf.Clamp(hunterAttackInterval, 0.1f, 10f);
+            teacherAttackDamage = Mathf.Clamp(teacherAttackDamage, 1, 99);
             pistolDamage = Mathf.Max(1, pistolDamage);
             pistolMagSize = Mathf.Clamp(pistolMagSize, 1, 60);
             pistolMaxAmmo = Mathf.Clamp(pistolMaxAmmo, 1, 9999);

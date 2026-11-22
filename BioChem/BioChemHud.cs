@@ -207,9 +207,9 @@ namespace BioChem
             if (hunter) return $"猎刀 · 左键挥砍   {config.hunterDamage} 伤害 / {config.hunterAttackInterval:0.#} 秒";
             if (mini)
             {
-                string stun = ModEntry.StunCooldownRemain > 0f ? $"击晕冷却 {Mathf.CeilToInt(ModEntry.StunCooldownRemain)} 秒"
-                    : ModEntry.SelfStamina() < config.staminaCostPerStun ? $"体力不足 · 击晕需 {config.staminaCostPerStun:0.#}"
-                    : $"F 击晕 · 消耗 {config.staminaCostPerStun:0.#} 体力";
+                string stun = ModEntry.StunCooldownRemain > 0f ? $"挥棍冷却 {Mathf.CeilToInt(ModEntry.StunCooldownRemain)} 秒"
+                    : ModEntry.SelfStamina() < config.staminaCostPerStun ? $"体力不足 · 挥棍需 {config.staminaCostPerStun:0.#}"
+                    : $"左键挥棍 · 命中学生眩晕 {config.miniStunSeconds:0.#} 秒 / 命中猎手扣 {config.teacherAttackDamage} HP（消耗 {config.staminaCostPerStun:0.#} 体力）";
                 return stun + "\n靠近眩晕的学生抓取，再带到罚站柱";
             }
             if (teacher) return ModEntry.SelfSlowStacks > 0

@@ -113,6 +113,7 @@ namespace BioChem
             writer.WriteVector3(message.Origin);
             writer.WriteVector3(message.Direction);
             writer.WriteULong(message.AttackerUID);
+            writer.WriteFloat(message.Stamina); // MiniStrike 用
         }
 
         internal static BioChemMeleeMessage ReadMelee(NetworkReader reader)
@@ -125,7 +126,8 @@ namespace BioChem
                 Hp = reader.ReadInt(),
                 Origin = reader.ReadVector3(),
                 Direction = reader.ReadVector3(),
-                AttackerUID = reader.ReadULong()
+                AttackerUID = reader.ReadULong(),
+                Stamina = reader.ReadFloat()
             };
         }
 

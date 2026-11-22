@@ -26,7 +26,7 @@ namespace BioChem
         private const float RecoilPosKick = 0.05f;   // viewmodel 后坐（沿 -Z 位移冲量）
         private const float RecoilRotKick = 7f;      // 后坐上抬角度
         private const float ModelLength = 0.9f;      // 模型归一化长度（米）
-        // 打包 OBJ（CS1.6 模型）文件坐标里的枪口环中心：枪口沿 -Z，LoadObj 按 180° yaw 转到 +Z
+        // 打包 OBJ（CS1.6 模型）文件坐标里的枪口环中心：枪口沿 -Z，LoadObj 按 180° yaw 转到 +Z（再 roll 180° 正过来）
         private static readonly Vector3 ObjMuzzle = new Vector3(-0.069f, 2.473f, -18.290f);
         // viewmodel 在相机空间的位姿（参考老师剑 idleCameraOffset (0.35, -0.38, 0.7)）
         private static readonly Vector3 ViewLocalPos = new Vector3(0.30f, -0.26f, 0.55f);
@@ -436,7 +436,8 @@ namespace BioChem
                 string objPath = string.IsNullOrEmpty(modDir) ? null : Path.Combine(modDir, "Assets", "ak47.obj");
                 templateGun = objPath != null && File.Exists(objPath)
                     ? WeaponModels.LoadObj(objPath, "Ak47Model", new Color(0.18f, 0.17f, 0.16f), 0.45f, ModelLength, 180f, ObjMuzzle, out _,
-                        textureFile: string.IsNullOrEmpty(modDir) ? null : Path.Combine(modDir, "Assets", "ak47.png"))
+                        textureFile: string.IsNullOrEmpty(modDir) ? null : Path.Combine(modDir, "Assets", "ak47.png"),
+                        modelRollDeg: 180f) // CS1.6 转出的 OBJ 上下颠倒：绕枪管轴 roll 180° 正过来
                     : null;
                 if (templateGun != null)
                     ModEntry.Log?.Invoke("[状态] AK47 模型已加载（OBJ）");
