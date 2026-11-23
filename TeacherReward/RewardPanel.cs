@@ -34,29 +34,39 @@ namespace TeacherReward
         {
             LocateAssets();
             if (canvasGo == null) Build();
-            Refresh();
             canvasGo.SetActive(true);
-            SetUIInputRule(true);
+            Refresh();
+            MonoSingletonT<InputManager>.Instance.SetCursorState(CursorLockMode.None);
         }
 
         internal static void Close()
         {
-            if (canvasGo != null && canvasGo.activeSelf)
-            {
-                var es = UnityEngine.EventSystems.EventSystem.current;
-                if (es != null && es.currentSelectedGameObject != null
-                    && es.currentSelectedGameObject.transform.IsChildOf(canvasGo.transform))
-                    es.SetSelectedGameObject(null);
-                canvasGo.SetActive(false);
-            }
+            if (!IsOpen) return;
+            var es = UnityEngine.EventSystems.EventSystem.current;
+            if (es != null && es.currentSelectedGameObject != null
+                && es.currentSelectedGameObject.transform.IsChildOf(canvasGo.transform))
+                es.SetSelectedGameObject(null);
+            canvasGo.SetActive(false);
             SetUIInputRule(false);
+            if (MonoSingletonT<InputManager>.IsSingletonActive())
+                SingletonT<UIManager>.Instance.RefreshCursorState();
         }
 
         internal static void Teardown()
         {
-            SetUIInputRule(false);
+            Close();
             if (canvasGo != null) UnityEngine.Object.Destroy(canvasGo);
             canvasGo = null;
+        }
+
+        // 游戏会在窗口切换、手柄切换和重新聚焦时重设光标。
+        internal static bool BeforeSetCursorState(InputManager __instance)
+        {
+            if (!IsOpen) return true;
+            Cursor.lockState = CursorLockMode.None;
+            Cursor.visible = true;
+            __instance.isCursorShowing = true;
+            return false;
         }
 
         // 与 UISettingView.OnActive/OnPassive 同款：面板打开期间冻结玩家输入
@@ -67,9 +77,10 @@ namespace TeacherReward
             {
                 if (MonoSingletonT<InputManager>.IsSingletonActive())
                 {
-                    MonoSingletonT<InputManager>.Instance.ChangeRuleSet(EInputRuleSets.RuleSet0, EInputRule.Rule_UISetting, on, false);
-                    uiRuleActive = on;
+                    if (on || SingletonT<UIManager>.Instance.GetOpenUI(EUIWindowType.Setting)?.GetVisible() != true)
+                        MonoSingletonT<InputManager>.Instance.ChangeRuleSet(EInputRuleSets.RuleSet0, EInputRule.Rule_UISetting, on, false);
                 }
+                uiRuleActive = on && MonoSingletonT<InputManager>.IsSingletonActive();
             }
             catch { /* 输入规则失败不影响面板本身 */ }
         }
@@ -175,6 +186,7 @@ namespace TeacherReward
         private static void Build()
         {
             canvasGo = new GameObject("老师奖励面板", typeof(Canvas), typeof(CanvasScaler), typeof(GraphicRaycaster));
+            canvasGo.SetActive(false);
             UnityEngine.Object.DontDestroyOnLoad(canvasGo);
             Canvas canvas = canvasGo.GetComponent<Canvas>();
             canvas.renderMode = RenderMode.ScreenSpaceOverlay;
@@ -240,21 +252,22 @@ namespace TeacherReward
                 btn.onClick.AddListener(() => ModEntry.SelectCard(captured.Id));
             }
 
-            Image closeImg = NewImage(win, "关闭", btnSprite, new Color(0.5f, 0.25f, 0.25f, 1f));
-            Place(closeImg.rectTransform, new Vector2(0.5f, 0f), new Vector2(1f, 0f), new Vector2(150f, 52f), new Vector2(-24f, 18f));
+            Image closeImg = NewImage(win, "关闭", null, new Color(0.28f, 0.18f, 0.18f, 1f));
+            Place(closeImg.rectTransform, Vector2.one, Vector2.one, new Vector2(104f, 46f), new Vector2(-20f, -16f));
             Button closeBtn = closeImg.gameObject.AddComponent<Button>();
-            Text closeLabel = NewText(closeImg.transform, "文字", "关闭", baseFontSize, TextAnchor.MiddleCenter, bodyInk);
+            closeBtn.targetGraphic = closeImg;
+            Text closeLabel = NewText(closeImg.transform, "文字", "关闭", baseFontSize, TextAnchor.MiddleCenter, Color.white);
             Stretch(closeLabel.rectTransform);
             closeBtn.onClick.AddListener(Close);
         }
 
-        // 克隆设置窗口的窗框节点：剥掉游戏逻辑脚本只留引擎视觉件，残件藏掉、标题改文案；
-        // 克隆瞬间游戏脚本的 Awake 无法避免，失败则整体回退自建底框
+        // 克隆设置窗口的窗框节点，在画布激活前剥掉游戏逻辑脚本并替换标题。
         private static bool TryCloneWindowFrame(out RectTransform win)
         {
             GameObject clone = null;
             try
             {
+                Rect frameRect = ((RectTransform)bgNode.transform).rect;
                 clone = UnityEngine.Object.Instantiate(bgNode, canvasGo.transform, false);
                 clone.name = "窗口(复用设置界面)";
                 foreach (Animator a in clone.GetComponentsInChildren<Animator>(true))
@@ -275,19 +288,10 @@ namespace TeacherReward
                 }
                 foreach (Button b in clone.GetComponentsInChildren<Button>(true))
                 {
-                    // RemoveAllListeners 清不掉序列化的持久监听（目标 UISettingView 已被剥掉，点了报错）；
-                    // 拆掉重建一个干净的 Button（Destroy 同帧生效不了，必须 DestroyImmediate 才能 AddComponent 同类型）。
-                    // gameObject/挂图引用必须在销毁前抓出来——销毁后的组件引用不能再访问
+                    // 按钮由奖励面板统一创建，隐藏原窗框自带的控件。
                     GameObject buttonGo = b.gameObject;
-                    Graphic targetGraphic = b.targetGraphic;
-                    string n = buttonGo.name.ToLowerInvariant();
-                    bool isClose = n.Contains("close") || n.Contains("guanbi") || n.Contains("cha");
                     UnityEngine.Object.DestroyImmediate(b);
-                    Button fresh = buttonGo.AddComponent<Button>();
-                    fresh.targetGraphic = targetGraphic;
-                    fresh.transition = Selectable.Transition.ColorTint;
-                    if (isClose) fresh.onClick.AddListener(Close);
-                    else buttonGo.SetActive(false);
+                    if (buttonGo != clone) buttonGo.SetActive(false);
                 }
                 bool titleDone = false;
                 foreach (Text t in clone.GetComponentsInChildren<Text>(true))
@@ -302,13 +306,14 @@ namespace TeacherReward
                 RectTransform rt = (RectTransform)clone.transform;
                 rt.localScale = Vector3.one;
                 Place(rt, new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f),
-                    new Vector2(Mathf.Abs(rt.rect.width), Mathf.Abs(rt.rect.height)), Vector2.zero);
+                    new Vector2(Mathf.Abs(frameRect.width), Mathf.Abs(frameRect.height)), Vector2.zero);
                 if (!titleDone)
                 {
                     Text title = NewText(rt, "标题", "老师奖励", baseFontSize + 8, TextAnchor.MiddleCenter, Color.white);
                     Place(title.rectTransform, new Vector2(0.5f, 1f), new Vector2(0.5f, 1f),
                         new Vector2(Mathf.Abs(rt.rect.width) - 48f, 52f), new Vector2(0f, -26f));
                 }
+                clone.SetActive(true);
                 win = rt;
                 return true;
             }

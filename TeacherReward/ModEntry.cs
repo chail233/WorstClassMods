@@ -153,6 +153,9 @@ namespace TeacherReward
                 harmony.Patch(
                     AccessTools.Method(typeof(TeacherStunComponent), "TryGetProjectileStun"),
                     prefix: new HarmonyMethod(typeof(ModEntry), "BeforeTeacherProjectileStun"));
+                harmony.Patch(
+                    AccessTools.Method(typeof(InputManager), nameof(InputManager.SetCursorState)),
+                    prefix: new HarmonyMethod(typeof(RewardPanel), nameof(RewardPanel.BeforeSetCursorState)));
                 // 消息注册挂到游戏自己的注册时机之后（防重注册清掉）
                 harmony.Patch(AccessTools.Method(typeof(RoomManager), "RegisterClientMessageHandlers"), postfix: new HarmonyMethod(typeof(ModEntry), "RegisterClient"));
                 harmony.Patch(AccessTools.Method(typeof(RoomManager), "RegisterServerMessageHandlers"), postfix: new HarmonyMethod(typeof(ModEntry), "RegisterServer"));
@@ -641,9 +644,6 @@ namespace TeacherReward
 
         private static void HandlePanelKey()
         {
-            if (!MonoSingletonT<InputManager>.IsSingletonActive()
-                || MonoSingletonT<InputManager>.Instance.FrozedPlayerInput
-                || MonoSingletonT<InputManager>.Instance.FrozedAllInput) return;
             if (!ReInput.isReady) return;
             Keyboard keyboard = ReInput.players.GetPlayer(0).controllers.Keyboard;
             if (keyboard == null || !keyboard.GetKeyDown(RewardConfig.PanelKeyCode)) return;
@@ -653,6 +653,9 @@ namespace TeacherReward
                 return;
             }
             // 开面板门槛：老师 + 上课中 + 有剩余点数
+            if (!MonoSingletonT<InputManager>.IsSingletonActive()
+                || MonoSingletonT<InputManager>.Instance.FrozedPlayerInput
+                || MonoSingletonT<InputManager>.Instance.FrozedAllInput) return;
             if (!ClassActive()) return;
             if (!IsLocalTeacher || MyPointsLeft <= 0) return;
             RewardPanel.Open();
@@ -671,6 +674,8 @@ namespace TeacherReward
                     BroadcastState();
                 }
             }
+            if (RewardPanel.IsOpen && (!ClassActive() || !IsLocalTeacher))
+                RewardPanel.Close();
             HandlePanelKey();
         }
 
@@ -698,6 +703,7 @@ namespace TeacherReward
 
         internal static void Cleanup()
         {
+            RewardPanel.Teardown();
             // 必须按目标注销：UnRegister(key) 会把该 key 上游戏自己的监听（黑板/门/柱子等）全部清掉
             if (registeredStateHook) MsgCenter.UnRegister(ClassStateChangedMsgId, Hooks);
             registeredStateHook = false;
