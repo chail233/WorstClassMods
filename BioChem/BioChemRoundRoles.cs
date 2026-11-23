@@ -62,8 +62,14 @@ namespace BioChem
                     Transform teacherSpawn = ClassroomConfig.Active?.GetClassroomByFloor(__instance.currentFloor)?.teacherPos;
                     if (teacherSpawn != null) position = teacherSpawn.position;
                 }
-                if (players.Count >= 2 && (bool)assignTeachers.Invoke(__instance, new object[] { players, position }))
-                    return true;
+                if (players.Count >= 2)
+                {
+                    // 新版多了 waitForBusLayout。生化揭晓时立即在原地换身份，无需等待校巴布置。
+                    object[] arguments = assignTeachers.GetParameters().Length == 3
+                        ? new object[] { players, position, false }
+                        : new object[] { players, position };
+                    if ((bool)assignTeachers.Invoke(__instance, arguments)) return true;
+                }
             }
             catch (Exception ex)
             {
