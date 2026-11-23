@@ -55,6 +55,11 @@ namespace TrickMole
         public ulong StudentUID;
     }
 
+    public struct NerdRescueScoreMessage : NetworkMessage
+    {
+        public ulong RescuerUID;
+    }
+
     public sealed class ModEntry : IMod
     {
         internal static Action<string> Log;
@@ -64,6 +69,8 @@ namespace TrickMole
         internal static readonly AudioEvents[] MusicPool = { AudioEvents.bgm_YuAi, AudioEvents.bgm_Hajimi1, AudioEvents.bgm_Hajimi2, AudioEvents.bgm_YuAids };
         private const string HarmonyId = "worstclass.trickmole";
         private const int ClassStateChangedMsgId = 301;
+        private const float NerdRescueScore = 10f;
+        private static ulong pendingRescueScoreUid;
 
         // 本局角色分配：uid → 角色（服务端由配置分配，客机经 MoleSelectMessage.AssignmentsJson 全量快照同步运行时副本）
         internal static readonly Dictionary<ulong, RoleDef> assigned = new Dictionary<ulong, RoleDef>();
@@ -197,6 +204,9 @@ namespace TrickMole
                 harmony.Patch(
                     AccessTools.Method(typeof(ClassroomManager), "OnResponseTrickCountData"),
                     prefix: new HarmonyMethod(typeof(ModEntry), "BeforeTrickCount"));
+                harmony.Patch(
+                    AccessTools.Method(typeof(SkillMessageHandler), "ReleaseStudentOnServer"),
+                    postfix: new HarmonyMethod(typeof(ModEntry), "AfterStudentRescue"));
                 // 罚站柱绑定真正生效的点：混的入被挂柱扣固定捣蛋度
                 harmony.Patch(
                     AccessTools.Method(typeof(PunishPillarComponent), "OnResponseBindStudent"),
@@ -239,6 +249,8 @@ namespace TrickMole
                 Reader<MolePushMessage>.read = MolePump.ReadPush;
                 Writer<MoleImmunityMessage>.write = MolePump.WriteImmunity;
                 Reader<MoleImmunityMessage>.read = MolePump.ReadImmunity;
+                Writer<NerdRescueScoreMessage>.write = (writer, message) => writer.WriteULong(message.RescuerUID);
+                Reader<NerdRescueScoreMessage>.read = reader => new NerdRescueScoreMessage { RescuerUID = reader.ReadULong() };
                 AthleteSprint.RegisterSerializers();
                 RegisterClient();
                 RegisterServer();
@@ -264,9 +276,12 @@ namespace TrickMole
         public static void BeforeTrickCount(ulong uid, ref float count)
         {
             if (count <= 0f) return;
+            // 固定救援奖励只跳过这一次倍率，仍计入累计并重置免伤计时。
+            bool isRescueReward = pendingRescueScoreUid != 0 && pendingRescueScoreUid == uid;
+            if (isRescueReward) pendingRescueScoreUid = 0;
             if (assigned.TryGetValue(uid, out RoleDef role))
             {
-                count *= role.trickMultiplier;
+                if (!isRescueReward) count *= role.trickMultiplier;
                 progressByUid[uid] = (progressByUid.TryGetValue(uid, out float v) ? v : 0f) + count; // 记录实际计入总进度的量
                 // 捣蛋即失去免伤并重新静心（各端从同一计分入口执行，状态天然同步）
                 if (RoleHasImmunity(role))
@@ -275,6 +290,29 @@ namespace TrickMole
                     immunityCharges[uid] = 0;
                 }
             }
+        }
+
+        // 原生方法只在罚站柱上的学生已成功释放时返回 true，手动和无人机救援共用。
+        public static void AfterStudentRescue(ulong rescuerUID, StudentReleaseMessageRequest_C2S request, bool __result)
+        {
+            if (!__result || !NetRuntime.IsServer || rescuerUID == 0 || rescuerUID == request.studentUID) return;
+            if (!assigned.TryGetValue(rescuerUID, out RoleDef role) || role.id != "nerd") return;
+            if (!ClassroomManager.IsSingletonActive() || !RoomManager.IsSingletonActive()) return;
+            ClassroomManager classroom = ClassroomManager.Instance;
+            if (classroom.curState != EClassroomState.Classing || classroom.DebugFreezeTrickCount) return;
+            Unit rescuer = UnitManager.Instance.GetUnitByUID(rescuerUID);
+            if (rescuer == null || !rescuer.isPlayer || !rescuer.IsStudent) return;
+
+            RoomManager.Instance.BroadcastToAllExceptHost(new NerdRescueScoreMessage { RescuerUID = rescuerUID });
+            ApplyNerdRescueScore(rescuerUID);
+        }
+
+        private static void ApplyNerdRescueScore(ulong uid)
+        {
+            if (!ClassroomManager.IsSingletonActive() || !UnitManager.IsSingletonActive()) return;
+            pendingRescueScoreUid = uid;
+            try { ClassroomManager.Instance.OnResponseTrickCountData(uid, NerdRescueScore); }
+            finally { pendingRescueScoreUid = 0; }
         }
 
         // ===== 挂柱惩罚（对所有有捣蛋累计的角色生效） =====
@@ -1158,6 +1196,10 @@ namespace TrickMole
             NetworkClient.RegisterHandler<MoleMusicMessage>(OnClientMusic, true);
             NetworkClient.RegisterHandler<MolePushMessage>(OnClientPush, true);
             NetworkClient.RegisterHandler<MoleImmunityMessage>(OnClientImmunity, true);
+            NetworkClient.RegisterHandler<NerdRescueScoreMessage>(message =>
+            {
+                if (!NetworkServer.active) ApplyNerdRescueScore(message.RescuerUID);
+            }, true);
             AthleteSprint.RegisterClient();
         }
 
