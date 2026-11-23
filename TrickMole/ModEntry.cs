@@ -59,7 +59,7 @@ namespace TrickMole
     {
         internal static Action<string> Log;
 
-        internal static readonly KeyCode MusicKey = KeyCode.B;
+        internal static readonly KeyCode RoleBKey = KeyCode.B;
         internal static readonly KeyCode PushKey = KeyCode.E;
         internal static readonly AudioEvents[] MusicPool = { AudioEvents.bgm_YuAi, AudioEvents.bgm_Hajimi1, AudioEvents.bgm_Hajimi2, AudioEvents.bgm_YuAids };
         private const string HarmonyId = "worstclass.trickmole";
@@ -239,6 +239,7 @@ namespace TrickMole
                 Reader<MolePushMessage>.read = MolePump.ReadPush;
                 Writer<MoleImmunityMessage>.write = MolePump.WriteImmunity;
                 Reader<MoleImmunityMessage>.read = MolePump.ReadImmunity;
+                AthleteSprint.RegisterSerializers();
                 RegisterClient();
                 RegisterServer();
 
@@ -523,6 +524,7 @@ namespace TrickMole
 
         private static void OnClassStateChanged(EClassroomState state)
         {
+            if (state != EClassroomState.Classing) AthleteSprint.Reset();
             // 每节课开始重选；下课/课前清空并通知全员撤掉显示
             // 冷却也一并清零：上局下课触发的 StopMusicServer 会残留冷却，不清会让新局开场无法广播
             if (state == EClassroomState.Prepare)
@@ -1026,7 +1028,7 @@ namespace TrickMole
             return !TryConsumeImmunity(request.unitUID);
         }
 
-        // ===== 体育生：视线内外移速 + 进食/救人提速 =====
+        // ===== 体育生：冲刺、视线内外移速 + 进食/救人提速 =====
 
         private static readonly Dictionary<ulong, (int frame, bool seen)> athleteSightCache = new Dictionary<ulong, (int, bool)>();
         private static RaycastHit[] sightHits = new RaycastHit[16];
@@ -1047,6 +1049,11 @@ namespace TrickMole
             Unit owner = __instance.owner;
             if (owner == null || !owner.isLocalPlayer || owner.IsDead || !owner.IsStudent) return;
             if (!assigned.TryGetValue(owner.UID, out RoleDef role)) return;
+            if (AthleteSprint.HasSkill(role) && AthleteSprint.IsActiveFor(owner.UID))
+            {
+                __result *= AthleteSprint.SpeedMultiplier;
+                return;
+            }
             if (role.speedBoostUnseen <= 0f && role.speedPenaltySeen <= 0f) return;
             if (IsSeenByAnyTeacher(owner, role))
             {
@@ -1151,12 +1158,14 @@ namespace TrickMole
             NetworkClient.RegisterHandler<MoleMusicMessage>(OnClientMusic, true);
             NetworkClient.RegisterHandler<MolePushMessage>(OnClientPush, true);
             NetworkClient.RegisterHandler<MoleImmunityMessage>(OnClientImmunity, true);
+            AthleteSprint.RegisterClient();
         }
 
         public static void RegisterServer()
         {
             NetworkServer.RegisterHandler<MoleMusicMessage>(OnServerMusic, true);
             NetworkServer.RegisterHandler<MolePushMessage>(OnServerPush, true);
+            AthleteSprint.RegisterServer();
         }
 
         private static void OnMoleSelect(MoleSelectMessage message)
@@ -1173,6 +1182,7 @@ namespace TrickMole
                 RoleDef role = ParseRole(roleJson);
                 if (role != null) assigned[uid] = role;
             }
+            if (!AthleteSprint.HasSkill(MyRole)) AthleteSprint.ClearLocal();
             // 诊断：条数/应用数任一变化必打（同内容重广播不打防刷屏）
             if (count != lastLoggedEntryCount || assigned.Count != lastLoggedApplied)
             {
@@ -1262,7 +1272,8 @@ namespace TrickMole
             TickImmunity(Time.unscaledDeltaTime);
             MuteLowLevelChannels(musicPlaying);
             TickMusicPlayback();
-            HandleMusicKey();
+            AthleteSprint.Tick();
+            HandleRoleBKey();
             HandlePushKey();
         }
 
@@ -1274,18 +1285,26 @@ namespace TrickMole
             return state == EClassroomState.Prepare || state == EClassroomState.Classing;
         }
 
-        // 本地玩家持有广播技能时，按 B 开关广播（房主直接本地处理）
-        private static void HandleMusicKey()
+        // B 键按角色分派：体育生冲刺，其他持有广播技能的角色开关广播。
+        private static void HandleRoleBKey()
         {
             if (!UnitManager.IsSingletonActive()) return;
             ulong self = UnitManager.Instance.localPlayerUID;
-            if (!assigned.TryGetValue(self, out RoleDef role) || !role.canBroadcast) return;
+            if (!assigned.TryGetValue(self, out RoleDef role)) return;
+            bool isAthlete = AthleteSprint.HasSkill(role);
+            if (!isAthlete && !role.canBroadcast) return;
             if (!ClassroomManager.IsSingletonActive() || ClassroomManager.Instance.curState != EClassroomState.Classing) return;
-            if (IsPunished(UnitManager.Instance.GetUnitByUID(self))) return; // 被挂柱禁用技能
+            Unit player = UnitManager.Instance.GetUnitByUID(self);
+            if (IsPunished(player)) return; // 被挂柱禁用技能
             if (!MonoSingletonT<InputManager>.IsSingletonActive() || MonoSingletonT<InputManager>.Instance.FrozedPlayerInput || MonoSingletonT<InputManager>.Instance.FrozedAllInput) return;
             if (!ReInput.isReady) return;
             Keyboard keyboard = ReInput.players.GetPlayer(0).controllers.Keyboard;
-            if (keyboard == null || !keyboard.GetKeyDown(MusicKey)) return;
+            if (keyboard == null || !keyboard.GetKeyDown(RoleBKey)) return;
+            if (isAthlete)
+            {
+                AthleteSprint.Request(player);
+                return;
+            }
             if (NetRuntime.IsServer)
             {
                 if (musicPlaying) StopMusicServer();
@@ -1303,6 +1322,7 @@ namespace TrickMole
 
         internal static void Cleanup()
         {
+            AthleteSprint.Reset();
             if (registeredStateHook) MsgCenter.UnRegister(ClassStateChangedMsgId);
             registeredStateHook = false;
         }

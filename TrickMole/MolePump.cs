@@ -26,6 +26,7 @@ namespace TrickMole
             if (!UnitManager.IsSingletonActive()) return;
 
             RoleDef myRole = ModEntry.MyRole;
+            bool hasSprint = AthleteSprint.HasSkill(myRole);
             var lines = new List<string>();
             foreach (var pair in ModEntry.GetAssignedList())
             {
@@ -38,7 +39,7 @@ namespace TrickMole
 
             // 本地玩家被挂罚站柱 → 技能禁用提示（FSM 状态全端同步；免伤是被动技能，不受此限）
             bool punished = myRole != null
-                && (myRole.canBroadcast || myRole.canPush)
+                && (myRole.canBroadcast || myRole.canPush || hasSprint)
                 && UnitManager.Instance.GetUnitByUID(UnitManager.Instance.localPlayerUID) is Unit self
                 && self.isActived
                 && self.CurState() == (int)EUnitFsmStateType.StudentPunished;
@@ -52,7 +53,12 @@ namespace TrickMole
                     if (ModEntry.MyImmunityCharges > 0) lines.Add("免伤就绪：下一次老师攻击无效（捣蛋即失效）");
                     else lines.Add("静心充能中，还剩 " + Mathf.CeilToInt(ModEntry.MyImmunityRemaining) + " 秒获得免伤");
                 }
-                if (myRole.speedBoostUnseen > 0f || myRole.speedPenaltySeen > 0f)
+                float sprintRemaining = hasSprint ? AthleteSprint.ActiveRemaining : 0f;
+                if (sprintRemaining > 0f)
+                {
+                    lines.Add("冲刺中：移速 ×2，剩余 " + Mathf.CeilToInt(sprintRemaining) + " 秒");
+                }
+                else if (myRole.speedBoostUnseen > 0f || myRole.speedPenaltySeen > 0f)
                 {
                     Unit selfUnit = UnitManager.Instance.GetUnitByUID(UnitManager.Instance.localPlayerUID);
                     if (selfUnit != null && selfUnit.isActived && !selfUnit.IsDead)
@@ -67,11 +73,17 @@ namespace TrickMole
                         }
                     }
                 }
-                if (myRole.canBroadcast)
+                if (hasSprint && !punished && sprintRemaining <= 0f)
                 {
-                    if (ModEntry.musicPlaying) lines.Add("广播播放中…再按 " + ModEntry.MusicKey + " 停止");
+                    float cooldown = AthleteSprint.CooldownRemaining;
+                    if (cooldown > 0f) lines.Add("冲刺冷却：" + Mathf.CeilToInt(cooldown) + " 秒");
+                    else lines.Add("按 " + ModEntry.RoleBKey + " 冲刺（结束后眩晕 1 秒）");
+                }
+                if (myRole.canBroadcast && !hasSprint)
+                {
+                    if (ModEntry.musicPlaying) lines.Add("广播播放中…再按 " + ModEntry.RoleBKey + " 停止");
                     else if (!punished && ModEntry.ClientCooldownRemain > 0f) lines.Add("广播冷却中…");
-                    else if (!punished) lines.Add("按 " + ModEntry.MusicKey + " 播放广播（曲库 " + (ModEntry.MusicPool.Length + PmBridge.SharedTrackCount) + " 首）");
+                    else if (!punished) lines.Add("按 " + ModEntry.RoleBKey + " 播放广播（曲库 " + (ModEntry.MusicPool.Length + PmBridge.SharedTrackCount) + " 首）");
                 }
                 if (myRole.canPush && !punished && ModEntry.PushCooldownRemain > 0f)
                     lines.Add("推倒冷却中… " + Mathf.CeilToInt(ModEntry.PushCooldownRemain) + "s");
