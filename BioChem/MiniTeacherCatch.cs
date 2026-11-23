@@ -15,8 +15,7 @@ namespace BioChem
     ///   小老师无此组件）：ForceReleaseIfCarrying 服务端反射 ReleaseStudentOnServer 原地放下
     /// 生命周期：感染应用点 + Tick 1s 自愈 Ensure（晚加入/快照先于单位生成都能补上）；
     /// 清局/退房 Wake(false)+RemoveComponent 收组件（Unit.RemoveComponent 只摘链表不做生命周期，需手动 OnPassive）。
-    /// 抓取消耗：不耗体力（小老师体力管击晕，抓取免费与原生老师一致——能量扣减在 CatchComponent.CatchUnit
-    /// 里经 SkillComponent?.UseSkillEnergy 静默跳过）
+    /// 小老师没有 SkillComponent，原生抓取仅在组件存在时调用体力扣减。
     /// </summary>
     internal static class MiniTeacherCatch
     {

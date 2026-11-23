@@ -9,15 +9,13 @@ namespace BioChem
     {
         internal const int MaxInitialInfectedStudents = 50;
 
+        public int arenaMap = -1;                 // -1 表示旧版文件，按 useQuarantineDepot 迁移
+        public bool useQuarantineDepot;
         public int initialInfectedStudents = 1;  // 正式上课时随机感染的人数，0 = 关闭
         public float pillarInfectSeconds = 10f;   // 挂柱多久后被感染（CF 节奏：抓到很快滚雪球）
         public int teacherMaxHp = 90;             // 大老师 HP
-        public int teacherHpPerWrite = 9;         // 大老师每次写完板书回复 HP（上限高了回复量配套上调）
+        public int teacherHpPerWrite = 9;         // 大老师和小老师每次写完板书回复的 HP
         public int miniMaxHp = 36;                // 小老师 HP
-        public float staminaMax = 10f;            // 小老师体力上限
-        public float staminaDrainPerSecond = 0.5f;// 小老师走路每秒耗体力
-        public float staminaCostPerStun = 2f;     // 小老师每次击晕耗体力
-        public float staminaPerWrite = 2f;        // 小老师每次完整写完板书回复的体力（长按读条期间缓慢回满这个量）
         public float miniStunSeconds = 2.5f;      // 小老师教棍命中学生的击晕时长
         public float miniStunRange = 2.2f;        // 小老师教棍攻击距离
         public float miniMeleeInterval = 0.5f;    // 小老师教棍挥击间隔（攻速）
@@ -62,6 +60,7 @@ namespace BioChem
 
         public static BioChemConfig Instance;
         private static string s_ConfigPath;
+        private static int localArenaSetting;
 
         public static void Load(string configDir, Action<string> log)
         {
@@ -86,6 +85,7 @@ namespace BioChem
                 log("配置读取失败，使用默认值：" + e.Message);
             }
             config.Clamp();
+            localArenaSetting = config.arenaMap;
             Instance = config;
         }
 
@@ -93,6 +93,7 @@ namespace BioChem
         public static void Save(Action<string> log)
         {
             if (Instance == null || s_ConfigPath == null) return;
+            localArenaSetting = Instance.arenaMap;
             try
             {
                 File.WriteAllText(s_ConfigPath, JsonUtility.ToJson(Instance, prettyPrint: true));
@@ -103,18 +104,18 @@ namespace BioChem
             }
         }
 
+        internal static void RestoreLocalArenaSetting() => Instance.arenaMap = localArenaSetting;
+
         // 数值边界。Load / 面板编辑 / 客机应用房主数值后都要走一遍
         public void Clamp()
         {
+            if (arenaMap == -1) arenaMap = useQuarantineDepot ? (int)BioChemMap.QuarantineDepot : (int)BioChemMap.Campus;
+            if (arenaMap < (int)BioChemMap.Campus || arenaMap > (int)BioChemMap.DistilleryYard) arenaMap = (int)BioChemMap.Campus;
             initialInfectedStudents = Mathf.Clamp(initialInfectedStudents, 0, MaxInitialInfectedStudents);
             pillarInfectSeconds = Mathf.Max(1f, pillarInfectSeconds);
             teacherMaxHp = Mathf.Max(1, teacherMaxHp);
             teacherHpPerWrite = Mathf.Max(0, teacherHpPerWrite);
             miniMaxHp = Mathf.Max(1, miniMaxHp);
-            staminaMax = Mathf.Max(1f, staminaMax);
-            staminaDrainPerSecond = Mathf.Clamp(staminaDrainPerSecond, 0f, 5f);
-            staminaCostPerStun = Mathf.Max(0f, staminaCostPerStun);
-            staminaPerWrite = Mathf.Max(0f, staminaPerWrite);
             miniStunSeconds = Mathf.Clamp(miniStunSeconds, 0.5f, 10f);
             miniStunRange = Mathf.Clamp(miniStunRange, 0.5f, 10f);
             miniMeleeInterval = Mathf.Clamp(miniMeleeInterval, 0.1f, 10f);

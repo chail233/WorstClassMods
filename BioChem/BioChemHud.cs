@@ -13,7 +13,6 @@ namespace BioChem
         private static readonly Color Muted = new Color32(207, 201, 177, 255);
         private static readonly Color Gold = new Color32(241, 195, 122, 255);
         private static readonly Color Health = new Color32(228, 117, 100, 255);
-        private static readonly Color Stamina = new Color32(165, 235, 179, 255);
 
         private readonly List<string> names = new List<string>(3);
         private readonly Vector3[] corners = new Vector3[4];
@@ -24,7 +23,7 @@ namespace BioChem
         private Sprite idleSlot, selectedSlot, keyFrame, meterTrack;
         private Image accent;
         private Text identity, evolution, weapon, ammo, hint, damage, roster;
-        private Meter health, stamina;
+        private Meter health;
 
         internal void Tick()
         {
@@ -71,8 +70,6 @@ namespace BioChem
                 health.Show(ref y, hp, max);
             }
             else health.Hide();
-            if (mini) stamina.Show(ref y, ModEntry.SelfStamina(), ModEntry.Config.staminaMax);
-            else stamina.Hide();
 
             bool classing = state == EClassroomState.Classing;
             loadout.gameObject.SetActive(student);
@@ -129,7 +126,6 @@ namespace BioChem
             settingsLabel.text = "F7 设置";
 
             health = new Meter(this, "生命", Health);
-            stamina = new Meter(this, "体力", Stamina);
             BuildLoadout();
             hint = Label(root, "操作与状态", 18, Ink);
             damage = Label(root, "感染伤害加成", 16, Gold);
@@ -204,12 +200,12 @@ namespace BioChem
         private static string Status(Unit self, bool hunter, bool mini, bool teacher, bool classing)
         {
             var config = ModEntry.Config;
+            if (!classing) return "准备阶段 · 倒计时结束时随机揭晓老师";
             if (hunter) return $"猎刀 · 左键挥砍   {config.hunterDamage} 伤害 / {config.hunterAttackInterval:0.#} 秒";
             if (mini)
             {
                 string stun = ModEntry.StunCooldownRemain > 0f ? $"挥棍冷却 {Mathf.CeilToInt(ModEntry.StunCooldownRemain)} 秒"
-                    : ModEntry.SelfStamina() < config.staminaCostPerStun ? $"体力不足 · 挥棍需 {config.staminaCostPerStun:0.#}"
-                    : $"左键挥棍 · 命中学生眩晕 {config.miniStunSeconds:0.#} 秒 / 命中猎手扣 {config.teacherAttackDamage} HP（消耗 {config.staminaCostPerStun:0.#} 体力）";
+                    : $"左键挥棍 · 命中学生眩晕 {config.miniStunSeconds:0.#} 秒 / 命中猎手扣 {config.teacherAttackDamage} HP";
                 return stun + "\n靠近眩晕的学生抓取，再带到罚站柱";
             }
             if (teacher) return ModEntry.SelfSlowStacks > 0

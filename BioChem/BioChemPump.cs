@@ -15,7 +15,11 @@ namespace BioChem
             BioChemPanel.Refresh();
         }
 
-        private void LateUpdate() => hud.Tick();
+        private void LateUpdate()
+        {
+            TeacherAura.Tick();
+            hud.Tick();
+        }
 
         private void OnGUI()
         {
@@ -30,7 +34,10 @@ namespace BioChem
                 }
             }
             if (ModEntry.enabled)
+            {
                 HunterFeedback.DrawOverlay(); // 猎刀命中标记/伤害浮字（攻击者本机，空状态零开销早退）
+                BioChemArenaSupplies.DrawPrompt();
+            }
         }
 
         private void OnDestroy()
@@ -40,6 +47,17 @@ namespace BioChem
         }
 
         // ===== Mirror 手工序列化 =====
+
+        internal static void WriteVending(NetworkWriter writer, BioChemVendingMessage message)
+        {
+            writer.WriteUInt(message.Round);
+            writer.WriteByte(message.Result);
+        }
+
+        internal static BioChemVendingMessage ReadVending(NetworkReader reader)
+        {
+            return new BioChemVendingMessage { Round = reader.ReadUInt(), Result = reader.ReadByte() };
+        }
 
         internal static void WriteState(NetworkWriter writer, BioChemStateMessage message)
         {
@@ -113,7 +131,6 @@ namespace BioChem
             writer.WriteVector3(message.Origin);
             writer.WriteVector3(message.Direction);
             writer.WriteULong(message.AttackerUID);
-            writer.WriteFloat(message.Stamina); // MiniStrike 用
         }
 
         internal static BioChemMeleeMessage ReadMelee(NetworkReader reader)
@@ -126,8 +143,7 @@ namespace BioChem
                 Hp = reader.ReadInt(),
                 Origin = reader.ReadVector3(),
                 Direction = reader.ReadVector3(),
-                AttackerUID = reader.ReadULong(),
-                Stamina = reader.ReadFloat()
+                AttackerUID = reader.ReadULong()
             };
         }
 
@@ -161,7 +177,6 @@ namespace BioChem
             writer.WriteByte(message.Kind);
             writer.WriteULong(message.TargetUID);
             writer.WriteFloat(message.Duration);
-            writer.WriteFloat(message.Stamina);
         }
 
         internal static BioChemStunMessage ReadStun(NetworkReader reader)
@@ -170,8 +185,7 @@ namespace BioChem
             {
                 Kind = reader.ReadByte(),
                 TargetUID = reader.ReadULong(),
-                Duration = reader.ReadFloat(),
-                Stamina = reader.ReadFloat()
+                Duration = reader.ReadFloat()
             };
         }
 

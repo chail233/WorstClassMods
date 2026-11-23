@@ -8,6 +8,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <EmbeddedResource Include="Maps\DistilleryYard.bin.gz" LogicalName="BioChem.DistilleryYard" WithCulture="false" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- 吹箭筒弹道：Physics.SphereCastNonAlloc / LayerMask -->
     <Reference Include="UnityEngine.PhysicsModule">
       <HintPath>$(ManagedDir)\UnityEngine.PhysicsModule.dll</HintPath>

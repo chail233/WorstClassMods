@@ -15,6 +15,8 @@ namespace BioChem
         private static Text statusText;
         private static Button hostToggle;
         private static Text hostToggleLabel;
+        private static Button mapToggle;
+        private static Text mapToggleLabel;
         private static GameObject settingsPage;
         private static bool uiRuleActive;
 
@@ -230,8 +232,8 @@ namespace BioChem
             }
 
             float innerW = Mathf.Abs(win.rect.width) - 96f;
-            float bodyTopY = -160f; // 玩法规则页签已删：状态行 + 开关下面就是步进器网格
-            float bodyH = Mathf.Max(240f, winH - 160f - 62f);
+            const float bodyTop = 196f;
+            float bodyH = Mathf.Max(240f, winH - bodyTop - 62f);
 
             statusText = NewText(win, "状态", "", baseFontSize, TextAnchor.UpperLeft, bodyInk);
             Place(statusText.rectTransform, new Vector2(0.5f, 1f), new Vector2(0f, 1f), new Vector2(innerW, 56f), new Vector2(-innerW / 2f, -64f));
@@ -242,11 +244,13 @@ namespace BioChem
             });
             Place(hostToggle.GetComponent<RectTransform>(), new Vector2(0.5f, 1f), new Vector2(0.5f, 0.5f), new Vector2(400f, 44f), new Vector2(0f, -124f));
             hostToggleLabel = hostToggle.GetComponentInChildren<Text>();
+            BuildMapToggle(win, new Vector2(0.5f, 1f), new Vector2(0.5f, 1f),
+                new Vector2(400f, 36f), new Vector2(0f, -152f));
 
             // 步进器网格：单页铺满（玩法规则长文案已删，避免超出屏幕）
             var settingsGo = new GameObject("数值页", typeof(RectTransform));
             settingsGo.transform.SetParent(win, false);
-            Place(settingsGo.GetComponent<RectTransform>(), new Vector2(0.5f, 1f), new Vector2(0.5f, 1f), new Vector2(innerW, bodyH), new Vector2(0f, bodyTopY));
+            Place(settingsGo.GetComponent<RectTransform>(), new Vector2(0.5f, 1f), new Vector2(0.5f, 1f), new Vector2(innerW, bodyH), new Vector2(0f, -bodyTop));
             BuildGrid(settingsGo.transform, innerW, bodyH);
             settingsPage = settingsGo;
 
@@ -283,14 +287,6 @@ namespace BioChem
                 Get=()=>ModEntry.Config.teacherHpPerWrite, Set=v=>ModEntry.Config.teacherHpPerWrite=Mathf.RoundToInt(v) },
             new NumField { Label="小老师HP", Step=1, Min=1, Max=999, Int=true,
                 Get=()=>ModEntry.Config.miniMaxHp, Set=v=>ModEntry.Config.miniMaxHp=Mathf.RoundToInt(v) },
-            new NumField { Label="体力上限", Step=0.5f, Min=1f, Max=999f,
-                Get=()=>ModEntry.Config.staminaMax, Set=v=>ModEntry.Config.staminaMax=v },
-            new NumField { Label="走路耗体力/秒", Step=0.1f, Min=0f, Max=5f,
-                Get=()=>ModEntry.Config.staminaDrainPerSecond, Set=v=>ModEntry.Config.staminaDrainPerSecond=v },
-            new NumField { Label="击晕耗体力", Step=0.5f, Min=0f, Max=999f,
-                Get=()=>ModEntry.Config.staminaCostPerStun, Set=v=>ModEntry.Config.staminaCostPerStun=v },
-            new NumField { Label="写板书回体力", Step=0.5f, Min=0f, Max=999f,
-                Get=()=>ModEntry.Config.staminaPerWrite, Set=v=>ModEntry.Config.staminaPerWrite=v },
             new NumField { Label="击晕时长(秒)", Step=0.5f, Min=0.5f, Max=10f,
                 Get=()=>ModEntry.Config.miniStunSeconds, Set=v=>ModEntry.Config.miniStunSeconds=v },
             new NumField { Label="击晕距离", Step=0.5f, Min=0.5f, Max=10f,
@@ -504,6 +500,13 @@ namespace BioChem
             }
 
             bool editable = NetRuntime.IsServer && !ModEntry.ClassInProgress();
+            if (mapToggle != null) mapToggle.interactable = editable;
+            if (mapToggleLabel != null)
+            {
+                string selectedMap = BioChemArenaLayout.NameOf((BioChemMap)ModEntry.Config.arenaMap);
+                string status = editable ? "下节生化地图 · " : "房主选择 · ";
+                mapToggleLabel.text = status + selectedMap;
+            }
             if (!NetRuntime.IsServer)
             {
                 if (hostToggle != null) hostToggle.interactable = false;
@@ -552,10 +555,12 @@ namespace BioChem
                 new Vector2(innerW, 38f), new Vector2(pad, -58f));
             hostToggleLabel = hostToggle.GetComponentInChildren<Text>();
             hostToggleLabel.fontSize = Mathf.Max(16, baseFontSize - 4); // 状态文案较长，缩一号铺满整行
+            BuildMapToggle(parent, new Vector2(0f, 1f), new Vector2(0f, 1f),
+                new Vector2(innerW, 34f), new Vector2(pad, -102f));
 
             // 网格必须有独立容器：BuildGrid 从容器顶部往下排，直接挂面板根会压住状态行和开关。
             // 玩法规则长文案已删（超出屏幕），整个下部高度都给步进器网格
-            float gridTop = 108f;
+            float gridTop = 144f;
             float gridH = Mathf.Max(240f, h - gridTop - 8f);
             var gridGo = new GameObject("数值网格", typeof(RectTransform));
             gridGo.transform.SetParent(parent, false);
@@ -565,6 +570,18 @@ namespace BioChem
         }
 
         // ===== 控件辅助 =====
+
+        private static void BuildMapToggle(Transform parent, Vector2 anchor, Vector2 pivot, Vector2 size, Vector2 offset)
+        {
+            mapToggle = NewButton(parent, "地图", "", new Color(0.22f, 0.44f, 0.44f), size, () =>
+            {
+                if (!NetRuntime.IsServer || ModEntry.ClassInProgress()) return;
+                ModEntry.Config.arenaMap = (ModEntry.Config.arenaMap + 1) % ((int)BioChemMap.DistilleryYard + 1);
+                ModEntry.OnConfigEdited();
+            }, Mathf.Max(16, baseFontSize - 4));
+            Place(mapToggle.GetComponent<RectTransform>(), anchor, pivot, size, offset);
+            mapToggleLabel = mapToggle.GetComponentInChildren<Text>();
+        }
 
         // 带文字的按钮：尺寸/位置由调用方 Place 覆盖；fontSize 可选（小格子按钮的字必须跟着缩，否则被截没）
         private static Button NewButton(Transform parent, string name, string label, Color fallbackColor, Vector2 size, Action onClick, int? fontSize = null)
