@@ -126,7 +126,9 @@ namespace BioChem
                 broadcastState(announcement); // 可靠快照先于原生传送，客机先建立场地和碰撞。
             }
 
-            if (!Active || Time.unscaledTime < nextPlacement) return;
+            if (!Active) return;
+            BioChemArenaStudents.TickServer();
+            if (Time.unscaledTime < nextPlacement) return;
             nextPlacement = Time.unscaledTime + 0.5f;
             foreach (Unit unit in room.GetPlayers().Values)
             {
@@ -227,6 +229,7 @@ namespace BioChem
             }
             BioChemArenaSupplies.BeginRound();
             if (pillarCount < propCount - 1) SpawnMissingPillars(pillarCount + 1);
+            BioChemArenaStudents.BeginRound(geometry.Root, layout.Playable, studentSpawns);
             if (++roundSequence == 0) roundSequence++;
             Round = roundSequence;
             ModEntry.Log("[状态] 生化地图出生点已就绪：教师 " + teacherSpawns.Count + "、学生 " + studentSpawns.Count
@@ -332,6 +335,7 @@ namespace BioChem
 
         internal static void Reset()
         {
+            BioChemArenaStudents.Reset();
             BioChemArenaSupplies.Reset();
             if (NetworkServer.active && UnitManager.IsSingletonActive())
             {

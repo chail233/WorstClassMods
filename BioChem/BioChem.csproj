@@ -12,6 +12,15 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- 货场运行时导航网格和原生操场 AI 学生 -->
+    <Reference Include="UnityEngine.AIModule">
+      <HintPath>$(ManagedDir)\UnityEngine.AIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Unity.AI.Navigation">
+      <HintPath>$(ManagedDir)\Unity.AI.Navigation.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <!-- 吹箭筒弹道：Physics.SphereCastNonAlloc / LayerMask -->
     <Reference Include="UnityEngine.PhysicsModule">
       <HintPath>$(ManagedDir)\UnityEngine.PhysicsModule.dll</HintPath>

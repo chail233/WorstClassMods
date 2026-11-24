@@ -273,6 +273,7 @@ namespace BioChem
             try
             {
                 BioChemRoundRoles.Install(harmony);
+                BioChemArenaStudents.Install(harmony);
                 // 身份翻转核心：感染者对所有游戏逻辑表现为老师（板书准入、NPC 敌我、捕获资格、名牌隐藏全走这两个属性）
                 harmony.Patch(AccessTools.PropertyGetter(typeof(Unit), "IsTeacher"),
                     postfix: new HarmonyMethod(typeof(ModEntry), "AfterIsTeacher"));
