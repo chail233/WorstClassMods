@@ -1,6 +1,12 @@
-# 工坊 content 剔除清单：部署目录里有、但运行时不需要的文件（相对 content 根）
-# .png 是转换器源图集副本（运行时只读 .raw）；CREDITS.txt 是开发文档
+# 公开包使用程序化武器模型与合成枪声。CS 1.6 素材仅供本地自用。
+Assets/ak47.obj
 Assets/ak47.png
+Assets/ak47.raw
+Assets/ak47_shot.wav
+Assets/kukri.obj
 Assets/kukri.png
+Assets/kukri.raw
+Assets/pistol.obj
 Assets/pistol.png
+Assets/pistol.raw
 Assets/CREDITS.txt

@@ -6,43 +6,21 @@ namespace BioChem
     /// <summary>
     /// 猎手猎刀：程序化拼装的近战武器视觉（方块拼一把菜刀，各端本地创建，随猎手状态消息驱动，无网络对象）。
     /// - 世界刀挂在猎手 HandPosition 手骨下（其他玩家可见；自己那把用 PlayerSelf 层被本机相机剔除，不与 viewmodel 重复）
-    /// - 本地猎手额外挂一把相机 viewmodel（第一人称可见，偏移参考老师剑 idleCameraOffset）
-    /// - 挥动：PlaySwing 记时间戳，Tick 按进度转刀（举起→劈下→回位）；身体挥动动画由攻击者 PlayAnimSync("Throw") 原生同步
+    /// - 本地猎手额外挂一把相机 viewmodel，挥击时在视野前方横扫
+    /// - 身体挥动动画由攻击者 PlayAnimSync("Throw") 原生同步
     /// 生命周期：变身 Ensure / 还原·退房 Remove / 清局 RemoveAll；Tick 自愈重建（模型重载/部件晚绑定兜底）。
     /// 刀模型随父级（手骨/相机）销毁，注册表只在事件点与 Tick 兜底里清理。
     /// </summary>
     internal static class HunterKnife
     {
-        private const float SwingDuration = 0.3f;      // 一次挥刀的表现时长（与 hunterAttackInterval 0.4s 节奏匹配）
-        private const float SwingWindupDeg = -55f;     // 前段举刀角度
-        private const float SwingSlashDeg = 95f;       // 劈下终点角度
-        private const float SwingPivotDistance = 0.30f; // 挥刀支点离刀根的距离（沿刀背方向）：刀绕它扫出大幅弧线
-        private static readonly Vector3 SwingAxis = new Vector3(1f, -0.7f, 0f).normalized; // 斜劈轴：右上举刀→向左下劈出
         private static readonly Color TrailColor = new Color(1f, 0.42f, 0.18f); // 挥刀轨迹：终结者橙红
         private const float TrailWidth = 0.05f;
-        // 刀体在手部/相机空间的基础位姿（实测可调；世界刀优先对齐 ItemHandPos 参考位）
+        // 世界刀优先对齐 ItemHandPos 参考位
         private static readonly Vector3 HandLocalPos = new Vector3(0.02f, 0.05f, 0.01f);
         private static readonly Vector3 HandLocalEuler = new Vector3(0f, 0f, 0f);
         private static readonly Vector3 KnifeModelEuler = new Vector3(90f, 0f, 0f); // 刀刃(+Y)指向挂点前方
-        private static readonly Vector3 ViewLocalPos = new Vector3(0.34f, -0.32f, 0.60f); // 参考老师剑 idleCameraOffset (0.35, -0.38, 0.7)
-        private static readonly Vector3 ViewLocalEuler = new Vector3(30f, -12f, 8f);
 
-        private sealed class Rig
-        {
-            public Transform worldKnife;   // 手骨下的刀根（其他玩家可见）
-            public Vector3 worldRestPos;   // 静止位姿（挥刀绕支点公转的基准，结束恢复）
-            public Quaternion worldRestRot;
-            public Transform viewKnife;    // 相机下的刀根（仅本地猎手）
-            public Vector3 viewRestPos;
-            public Quaternion viewRestRot;
-            public TrailRenderer worldTrail; // 刀尖拖尾（挥刀轨迹，随刀销毁）
-            public TrailRenderer viewTrail;
-            public float swingStartAt = -999f;
-            public bool swinging;
-            public float nextBuildTryAt;   // 构建失败后的重试节流（等模型部件就绪）
-        }
-
-        private static readonly Dictionary<ulong, Rig> rigs = new Dictionary<ulong, Rig>();
+        private static readonly Dictionary<ulong, MeleeSwing> rigs = new Dictionary<ulong, MeleeSwing>();
         private static readonly List<ulong> prune = new List<ulong>();
         private static readonly List<ulong> rebuild = new List<ulong>();
 
@@ -54,32 +32,23 @@ namespace BioChem
         internal static void Ensure(Unit unit)
         {
             if (unit == null || !unit.isActived || unit.model == null) return;
-            if (rigs.TryGetValue(unit.UID, out Rig rig) && rig.worldKnife != null)
+            if (!rigs.TryGetValue(unit.UID, out MeleeSwing rig))
             {
-                if (unit.isLocalPlayer && rig.viewKnife == null) CaptureViewKnife(rig); // 相机可能晚建
-                return;
+                rig = new MeleeSwing(unit);
+                rigs.Add(unit.UID, rig);
             }
-            Remove(unit.UID); // 清掉半残 rig（比如只剩 viewKnife）
-            rig = new Rig();
-            rig.worldKnife = BuildHandKnife(unit);
-            if (rig.worldKnife != null)
+            if (rig.World == null)
             {
-                rig.worldRestPos = rig.worldKnife.localPosition;
-                rig.worldRestRot = rig.worldKnife.localRotation;
-                rig.worldTrail = rig.worldKnife.GetComponentInChildren<TrailRenderer>();
-                ModEntry.Log?.Invoke("[状态] " + ModEntry.GetName(unit.UID) + " 已持猎刀");
+                rig.BindWorld(BuildHandKnife(unit));
+                if (rig.World != null)
+                    ModEntry.Log?.Invoke("[状态] " + ModEntry.GetName(unit.UID) + " 已持猎刀");
             }
-            if (unit.isLocalPlayer)
-                CaptureViewKnife(rig);
-            rigs[unit.UID] = rig;
+            if (unit.isLocalPlayer && rig.View == null) rig.BindView(BuildViewModel());
         }
 
         internal static void Remove(ulong uid)
         {
-            if (!rigs.TryGetValue(uid, out Rig rig)) return;
-            rigs.Remove(uid);
-            if (rig.worldKnife != null) Object.Destroy(rig.worldKnife.gameObject);
-            if (rig.viewKnife != null) Object.Destroy(rig.viewKnife.gameObject);
+            if (rigs.Remove(uid, out MeleeSwing rig)) rig.Destroy();
         }
 
         internal static void RemoveAll()
@@ -90,12 +59,11 @@ namespace BioChem
         /// <summary>挥刀表现入口：攻击者本地预测与其他端收到 Swing 广播共用。</summary>
         internal static void PlaySwing(ulong uid)
         {
-            if (!rigs.TryGetValue(uid, out Rig rig)) return;
-            rig.swingStartAt = Time.unscaledTime;
-            rig.swinging = true;
-            WeaponModels.EmitSlashTrail(rig.worldTrail, SwingDuration);
-            WeaponModels.EmitSlashTrail(rig.viewTrail, SwingDuration);
-            ApplySwingPose(rig, 0f);
+            if (!rigs.ContainsKey(uid) && UnitManager.IsSingletonActive())
+                Ensure(UnitManager.Instance.GetUnitByUID(uid));
+            if (!rigs.TryGetValue(uid, out MeleeSwing rig)) return;
+            float duration = Mathf.Min(0.30f, ModEntry.Config.hunterAttackInterval);
+            rig.Play(duration * 0.60f, duration * 0.40f);
         }
 
         // ===== 每帧驱动 =====
@@ -109,21 +77,17 @@ namespace BioChem
             foreach (var pair in rigs)
             {
                 ulong uid = pair.Key;
-                Rig rig = pair.Value;
-                if (!ModEntry.hunters.Contains(uid)) { prune.Add(uid); continue; } // 事件点漏清的兜底
-                float t = (now - rig.swingStartAt) / SwingDuration;
-                if (t < 1f) ApplySwingPose(rig, t);
-                else if (rig.swinging) ResetPose(rig);
-                if (now >= rig.nextBuildTryAt)
+                MeleeSwing rig = pair.Value;
+                if (!ModEntry.hunters.Contains(uid)) { prune.Add(uid); continue; }
+                rig.Tick(now);
+                if (now >= rig.NextBuildTryAt)
                 {
-                    bool needWorld = rig.worldKnife == null;                 // 世界刀缺失（未建成/模型重载）
-                    bool needView = rig.viewKnife == null                    // viewmodel 缺失（相机晚就绪）——
-                                    && UnitManager.IsSingletonActive()       // 房主没有快照自愈通道，只能靠这里补
-                                    && UnitManager.Instance.localPlayerUID == uid;
-                    if (needWorld || needView)
+                    bool needView = rig.View == null && UnitManager.IsSingletonActive()
+                        && UnitManager.Instance.localPlayerUID == uid;
+                    if (rig.World == null || needView)
                     {
-                        rebuild.Add(uid); // Ensure 幂等：缺哪补哪，0.5s 一试防每帧重建
-                        rig.nextBuildTryAt = now + 0.5f;
+                        rebuild.Add(uid);
+                        rig.NextBuildTryAt = now + 0.5f;
                     }
                 }
             }
@@ -134,40 +98,6 @@ namespace BioChem
                 Unit unit = UnitManager.Instance.GetUnitByUID(uid);
                 if (unit != null && unit.isActived && unit.model != null) Ensure(unit);
             }
-        }
-
-        private static void ApplySwingPose(Rig rig, float t)
-        {
-            float angle = SwingAngle(t);
-            if (rig.worldKnife != null)
-                WeaponModels.ApplySwingPose(rig.worldKnife, rig.worldRestPos, rig.worldRestRot, angle, 0f, SwingPivotDistance, SwingAxis);
-            if (rig.viewKnife != null)
-                WeaponModels.ApplySwingPose(rig.viewKnife, rig.viewRestPos, rig.viewRestRot, angle * 0.8f, 0f, SwingPivotDistance, SwingAxis);
-        }
-
-        private static void ResetPose(Rig rig)
-        {
-            rig.swinging = false;
-            WeaponModels.StopSlashTrail(rig.worldTrail); // 弧线按 time 自然淡出
-            WeaponModels.StopSlashTrail(rig.viewTrail);
-            if (rig.worldKnife != null)
-            {
-                rig.worldKnife.localPosition = rig.worldRestPos;
-                rig.worldKnife.localRotation = rig.worldRestRot;
-            }
-            if (rig.viewKnife != null)
-            {
-                rig.viewKnife.localPosition = rig.viewRestPos;
-                rig.viewKnife.localRotation = rig.viewRestRot;
-            }
-        }
-
-        // 举起→劈下→回位三段角度曲线
-        private static float SwingAngle(float t)
-        {
-            if (t < 0.3f) return Mathf.Lerp(0f, SwingWindupDeg, t / 0.3f);
-            if (t < 0.6f) return Mathf.Lerp(SwingWindupDeg, SwingSlashDeg, Mathf.Clamp01((t - 0.3f) / 0.3f));
-            return Mathf.Lerp(SwingSlashDeg, 0f, Mathf.Clamp01((t - 0.6f) / 0.4f));
         }
 
         // ===== 刀体拼装 =====
@@ -191,7 +121,7 @@ namespace BioChem
                 root.transform.localPosition = HandLocalPos;
                 root.transform.localRotation = Quaternion.Euler(HandLocalEuler);
             }
-            BuildParts(root.transform, Quaternion.Euler(KnifeModelEuler));
+            BuildParts(root.transform);
             int layer = LayerMask.NameToLayer(unit.isLocalPlayer ? "PlayerSelf" : "Player");
             if (layer >= 0) SetLayerRecursive(root, layer); // 部件挂完再统一设层
             return root.transform;
@@ -205,29 +135,17 @@ namespace BioChem
             if (camera == null) return null;
             var root = new GameObject("HunterKnifeView");
             root.transform.SetParent(camera.transform, false);
-            root.transform.localPosition = ViewLocalPos;
-            root.transform.localRotation = Quaternion.Euler(ViewLocalEuler);
-            BuildParts(root.transform, Quaternion.identity);
+            BuildParts(root.transform);
             return root.transform;
         }
 
-        private static void CaptureViewKnife(Rig rig)
-        {
-            Transform knife = BuildViewModel();
-            if (knife == null) return;
-            rig.viewKnife = knife;
-            rig.viewRestPos = knife.localPosition;
-            rig.viewRestRot = knife.localRotation;
-            rig.viewTrail = knife.GetComponentInChildren<TrailRenderer>();
-        }
-
         // 菜刀造型：root 即握点，拖尾挂刀尖 y≈0.29
-        private static void BuildParts(Transform root, Quaternion modelEuler)
+        private static void BuildParts(Transform root)
         {
             EnsureMaterials();
             var model = new GameObject("model");
             model.transform.SetParent(root, false);
-            model.transform.localRotation = modelEuler;
+            model.transform.localRotation = Quaternion.Euler(KnifeModelEuler);
             CreatePart(model.transform, "blade", new Vector3(0f, 0.17f, 0f), new Vector3(0.06f, 0.24f, 0.006f), bladeMaterial);
             CreatePart(model.transform, "guard", new Vector3(0f, 0.04f, 0f), new Vector3(0.075f, 0.025f, 0.022f), guardMaterial);
             CreatePart(model.transform, "handle", new Vector3(0f, -0.05f, 0f), new Vector3(0.03f, 0.12f, 0.03f), handleMaterial);

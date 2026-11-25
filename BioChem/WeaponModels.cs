@@ -269,20 +269,6 @@ namespace BioChem
             trail.emitting = false; // 弧线按 time 自然淡出，不瞬消
         }
 
-        // ===== 挥刀位姿（近战武器共用） =====
-
-        // 整刀绕腕前支点（沿刀背退 pivotDistance）刚体旋转，位置与朝向同轴同步转，刀刃贴弧线。
-        // swingAxisLocal 须无 Z 分量（保持支点⊥转轴）；pivotDistance=0 退化为原地自转
-        internal static void ApplySwingPose(Transform knife, Vector3 restPos, Quaternion restRot,
-            float angle, float zTilt, float pivotDistance, Vector3 swingAxisLocal)
-        {
-            Quaternion rot = restRot * Quaternion.AngleAxis(angle, swingAxisLocal) * Quaternion.Euler(0f, 0f, zTilt);
-            Quaternion delta = rot * Quaternion.Inverse(restRot);            // 相对静止姿态的刚体旋转
-            Vector3 pivot = restPos + (restRot * -Vector3.forward) * pivotDistance; // 支点在刀背延长线上（垂直于转轴）
-            knife.localPosition = pivot + delta * (restPos - pivot);
-            knife.localRotation = rot;
-        }
-
         // GoldSrc（CS1.6）转换的法线曾混入骨骼平移（长度可达数十而非 1，着色整体发蓝/花掉）：
         // 长度异常就放弃 OBJ 法线，改由几何重建（逐角展开的网格重建后即平面着色，符合低模观感）
         private static bool HasBrokenNormals(List<Vector3> normals)

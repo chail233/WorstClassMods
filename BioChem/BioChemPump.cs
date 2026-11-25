@@ -17,8 +17,12 @@ namespace BioChem
 
         private void LateUpdate()
         {
+            StudentKukri.Tick();
+            HunterKnife.Tick();
+            MiniTeacherMelee.Tick();
             TeacherAura.Tick();
             hud.Tick();
+            BioChemDamageScore.Tick();
         }
 
         private void OnGUI()
@@ -36,6 +40,7 @@ namespace BioChem
             if (ModEntry.enabled)
             {
                 HunterFeedback.DrawOverlay(); // 猎刀命中标记/伤害浮字（攻击者本机，空状态零开销早退）
+                BioChemDamageScore.DrawFlights();
                 BioChemArenaSupplies.DrawPrompt();
             }
         }
@@ -47,6 +52,23 @@ namespace BioChem
         }
 
         // ===== Mirror 手工序列化 =====
+
+        internal static void WriteDamageScore(NetworkWriter writer, BioChemDamageScoreMessage message)
+        {
+            writer.WriteULong(message.Attacker);
+            writer.WriteInt(message.Damage);
+            writer.WriteLong(message.Total);
+            writer.WriteVector3(message.Position);
+        }
+
+        internal static BioChemDamageScoreMessage ReadDamageScore(NetworkReader reader)
+        {
+            return new BioChemDamageScoreMessage
+            {
+                Attacker = reader.ReadULong(), Damage = reader.ReadInt(),
+                Total = reader.ReadLong(), Position = reader.ReadVector3()
+            };
+        }
 
         internal static void WriteVending(NetworkWriter writer, BioChemVendingMessage message)
         {

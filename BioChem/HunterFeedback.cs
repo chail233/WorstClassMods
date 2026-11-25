@@ -6,7 +6,7 @@ namespace BioChem
     /// <summary>
     /// 猎刀命中反馈（仅攻击者本机，客户端预测，CF 生化手感——点击瞬间出反馈，不等服务器）：
     /// - 命中标记：准星处四斜块 ✕ 闪现（击杀=红色加大）
-    /// - 伤害浮字：命中点屏幕投影 -伤害 上浮淡出（击杀=红色"击杀!"，位置定格不跟人）
+    /// - 伤害浮字：服务端确认扣血后在目标位置上浮淡出
     /// - 震屏：复用老师剑 TeacherSwordFeedback 命中震屏（HorizontalHit 同款曲线），击杀加大振幅
     /// 音效不在这里：攻击者命中音走挥刀预测（ModEntry）、其他端走 Hit 广播，靠 AttackerUID 去重防双响
     /// </summary>
@@ -24,6 +24,7 @@ namespace BioChem
             public string text;
             public Color color;
             public int fontSize;
+            public float screenOffset;
             public float spawnAt;
         }
 
@@ -33,24 +34,28 @@ namespace BioChem
         private static TeacherSwordFeedback shake;               // 老师剑同款震屏组件（懒建；随场景卸载销毁后自动重建）
         private static TeacherSwordShakeSettings shakeSettings;  // 优先抄老师剑 hitShake 曲线，懒解析一次
         private static GUIStyle numberStyle;                     // IMGUI 样式（OnGUI 内懒建）
+        private static int nextNumberOffset;
 
-        /// <summary>预测命中一条（攻击者本机）：target=被击者，killed=按当前 HP 预测致死/击倒；
-        /// damage=本次伤害（-1 用 hunterDamage），killText=致死文案（军刀击倒传"击倒!"）</summary>
-        internal static void OnPredictedHit(Unit target, bool killed, int damage = -1, string killText = "击杀!")
+        internal static void OnPredictedHit(bool killed)
         {
             float now = Time.unscaledTime;
             if (killed) killMarkerUntil = now + KillMarkerTime;
             hitMarkerUntil = Mathf.Max(hitMarkerUntil, now + HitMarkerTime);
+            PlayShake(killed ? KillShakeScale : 1f);
+        }
+
+        internal static void ShowDamage(Vector3 position, int amount)
+        {
             numbers.Add(new FloatNumber
             {
-                worldPos = target.Position + Vector3.up * 1.5f,
-                text = killed ? killText : "-" + (damage >= 0 ? damage : ModEntry.Config.hunterDamage),
-                color = killed ? new Color(1f, 0.25f, 0.2f) : new Color(1f, 0.9f, 0.55f),
-                fontSize = killed ? 30 : 22,
-                spawnAt = now,
+                worldPos = position,
+                text = "-" + amount,
+                color = new Color(1f, 0.44f, 0.30f),
+                fontSize = Mathf.Clamp(Mathf.RoundToInt(Screen.height * 0.028f), 20, 42),
+                screenOffset = ((nextNumberOffset++ % 3) - 1) * 20f,
+                spawnAt = Time.unscaledTime,
             });
-            if (numbers.Count > 12) numbers.RemoveRange(0, numbers.Count - 12); // 群体一刀+连挥防积压
-            PlayShake(killed ? KillShakeScale : 1f);
+            if (numbers.Count > 24) numbers.RemoveRange(0, numbers.Count - 24);
         }
 
         // 复用老师剑命中震屏（与老师挥剑命中同一手感来源；曲线上优先抄场上老师模型的 hitShake 设置）。
@@ -119,11 +124,14 @@ namespace BioChem
                 Vector3 screen = camera.WorldToScreenPoint(number.worldPos + Vector3.up * (t * NumberRiseWorld));
                 if (screen.z <= 0f) continue; // 相机背后不画
                 float alpha = 1f - t * t;     // 二次曲线淡出
-                numberStyle.fontSize = number.fontSize;
-                numberStyle.normal.textColor = new Color(number.color.r, number.color.g, number.color.b, alpha);
+                float pop = Mathf.Lerp(1.35f, 1f, Mathf.Clamp01(t * 6f));
+                numberStyle.fontSize = Mathf.RoundToInt(number.fontSize * pop);
                 Vector2 size = numberStyle.CalcSize(new GUIContent(number.text));
                 // WorldToScreenPoint 是左下原点，GUI 是左上原点
-                Rect rect = new Rect(screen.x - size.x / 2f, Screen.height - screen.y - size.y / 2f, size.x, size.y);
+                Rect rect = new Rect(screen.x + number.screenOffset - size.x / 2f, Screen.height - screen.y - size.y / 2f, size.x, size.y);
+                numberStyle.normal.textColor = new Color(0f, 0f, 0f, alpha * 0.85f);
+                GUI.Label(new Rect(rect.x + 1f, rect.y + 1f, rect.width, rect.height), number.text, numberStyle);
+                numberStyle.normal.textColor = new Color(number.color.r, number.color.g, number.color.b, alpha);
                 GUI.Label(rect, number.text, numberStyle);
             }
         }
