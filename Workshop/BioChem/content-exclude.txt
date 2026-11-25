@@ -1,12 +1,4 @@
-# 公开包使用程序化武器模型与合成枪声。CS 1.6 素材仅供本地自用。
-Assets/ak47.obj
+# 运行时从 .raw 读取贴图，PNG 是转换用的副本。
 Assets/ak47.png
-Assets/ak47.raw
-Assets/ak47_shot.wav
-Assets/kukri.obj
 Assets/kukri.png
-Assets/kukri.raw
-Assets/pistol.obj
 Assets/pistol.png
-Assets/pistol.raw
-Assets/CREDITS.txt
